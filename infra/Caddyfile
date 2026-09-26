@@ -1,0 +1,6 @@
+{$JGG_API_DOMAIN} {
+  encode gzip
+  reverse_proxy api:8787 {
+    flush_interval -1   # stream SSE immediately
+  }
+}

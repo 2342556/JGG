@@ -1,0 +1,25 @@
+# Netlify hosts the PWA (static). The API/worker/indexer run on your server (see docs/DEPLOY.md);
+# /api/* is proxied there so the browser sees ONE origin (cookies, CSRF and SIWS domain binding keep working).
+[build]
+  command = "npm install --no-audit --no-fund && node scripts/build-web.mjs"
+  publish = "apps/web/dist"
+[build.environment]
+  NODE_VERSION = "22"
+  # Set JGG_API_ORIGIN in Netlify → Site configuration → Environment variables, e.g. https://api.yourdomain.com
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    X-Frame-Options = "DENY"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    Permissions-Policy = "camera=(), microphone=(), geolocation=()"
+    Content-Security-Policy = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+[[headers]]
+  for = "/sw.js"
+  [headers.values]
+    Cache-Control = "no-cache"
+[[headers]]
+  for = "/assets/*"
+  [headers.values]
+    Cache-Control = "no-cache"

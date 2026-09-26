@@ -1,0 +1,8 @@
+{
+  "compilerOptions": {
+    "strict": true, "noEmit": true, "target": "ES2022", "module": "NodeNext", "moduleResolution": "NodeNext",
+    "allowImportingTsExtensions": true, "erasableSyntaxOnly": true, "verbatimModuleSyntax": true, "skipLibCheck": true,
+    "lib": ["ES2022", "DOM"], "types": []
+  },
+  "include": ["types/*.d.ts", "packages/*/src/**/*.ts", "apps/api/src/**/*.ts", "apps/workers/src/**/*.ts", "tests/**/*.ts"]
+}

@@ -1,0 +1,23 @@
+{
+  "name": "jgg-ai-trading-terminal",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.6" },
+  "scripts": {
+    "build": "node scripts/build-web.mjs",
+    "api": "node apps/api/src/server.ts",
+    "worker": "node apps/workers/src/worker.ts",
+    "dev": "node scripts/build-web.mjs && (node apps/api/src/server.ts & node apps/workers/src/worker.ts)",
+    "test": "node --test 'tests/domain/*.test.ts' 'tests/api/*.test.ts'",
+    "test:e2e": "python3 tests/e2e/smoke.py http://localhost:8787 docs/screenshots",
+    "typecheck": "tsc -p tsconfig.json && tsc -p apps/web/tsconfig.json",
+    "scan:secrets": "node scripts/secret-scan.mjs",
+    "requirements": "node scripts/requirements.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "0.27.7",
+    "react": "19.2.5",
+    "react-dom": "19.2.5"
+  }
+}

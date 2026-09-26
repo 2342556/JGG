@@ -1,0 +1,30 @@
+# Production-style run on a VPS (e.g. your Hostinger server). HTTPS via Caddy. One SQLite DB shared by the three processes.
+# Usage: cp .env.example .env (fill it) && docker compose -f infra/docker-compose.prod.yml --env-file .env up -d --build
+services:
+  api:
+    build: ..
+    environment: [ROLE=api]
+    env_file: ../.env
+    volumes: [jggdata:/data]
+    restart: unless-stopped
+  worker:
+    build: ..
+    environment: [ROLE=worker]
+    env_file: ../.env
+    volumes: [jggdata:/data]
+    restart: unless-stopped
+    depends_on: [api]
+  indexer:
+    build: ..
+    environment: [ROLE=indexer]
+    env_file: ../.env
+    volumes: [jggdata:/data]
+    restart: unless-stopped
+    depends_on: [api]
+  caddy:
+    image: caddy:2
+    ports: ["80:80", "443:443"]
+    environment: [JGG_API_DOMAIN=${JGG_API_DOMAIN}]
+    volumes: [./Caddyfile:/etc/caddy/Caddyfile:ro, caddydata:/data]
+    restart: unless-stopped
+volumes: { jggdata: {}, caddydata: {} }
