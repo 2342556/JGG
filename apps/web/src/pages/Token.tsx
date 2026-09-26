@@ -3,6 +3,9 @@ import { Link } from '../router.tsx';
 import { api, newKey } from '../api.ts';
 import { useApp, useApi, useTicks, State, TokenAvatar, Copy, Tabs, Seg, I, usd, pct, bpsPct, age, short, cls, signCls, price, SimTag, toast, errMsg, Drawer, NATIVE } from '../lib.tsx';
 import { TradeTicket } from '../components/Trade.tsx';
+import { ExitPlanEditor, cloneCfg, DEFAULT_EXIT_CONFIG, type ExitConfig } from '../components/ExitPlan.tsx';
+import { validateExitConfig } from '../../../../packages/domain/src/exitPlan.ts';
+import { EditExitsDrawer } from './Auto.tsx';
 
 // ---------------- Canvas candlestick chart (own implementation; no external chart lib available offline) ----------------
 export function CandleChart({ rows, height = 360 }: { rows: any[]; height?: number }) {
@@ -77,7 +80,7 @@ export function TokenPage({ chain, address }: { chain: string; address: string }
         </div>
       </div>
       <div className="token-side"><div className="panel"><TradeTicket chain={chain} address={address} symbol={tok.symbol} /></div>
-        <div className="panel pad"><h3>Exits &amp; automation</h3><p className="muted small">TP/SL, trailing and limit orders run in the JGG worker under your risk policy (deny-by-default).</p><button className="btn" onClick={() => setExitOpen(true)} disabled={!me}>Set TP / SL / trailing</button></div></div>
+        <div className="panel pad"><h3>Exits</h3><p className="muted small">Stop loss, partial profit and trailing stop for your tokens — with the exact trigger prices before you turn it on.</p><button className="btn" onClick={() => setExitOpen(true)} disabled={!me}>Set exits</button></div></div>
     </div>
     <ExitDrawer open={exitOpen} onClose={() => setExitOpen(false)} chain={chain} address={address} symbol={tok.symbol} priceNow={priceNow} />
   </div>;
@@ -125,31 +128,38 @@ function MyPosition({ chain, address, onExits }: { chain: string; address: strin
 const num4 = (v: string) => Number(v).toLocaleString(undefined, { maximumFractionDigits: 4 });
 
 export function ExitDrawer({ open, onClose, chain, address, symbol, priceNow }: { open: boolean; onClose: () => void; chain: string; address: string; symbol: string; priceNow: string | null }) {
-  const [kind, setKind] = useState<'tp_sl' | 'trailing_tp' | 'trailing_sl' | 'limit_sell' | 'limit_buy'>('tp_sl');
-  const [f, setF] = useState({ tp1: '0.5', tp1pct: '50', tp2: '1', tp2pct: '50', sl: '0.3', activation: '0.2', retracement: '0.1', target: '', amount: '0.1' });
-  const [busy, setBusy] = useState(false); const [created, setCreated] = useState<any>(null);
+  const { me } = useApp();
+  const [kind, setKind] = useState<'plan' | 'limit_sell' | 'limit_buy'>('plan');
+  const [cfg, setCfg] = useState<ExitConfig>(() => cloneCfg(DEFAULT_EXIT_CONFIG));
+  const [f, setF] = useState({ target: '', amount: '0.1' });
+  const [busy, setBusy] = useState(false); const [created, setCreated] = useState<any>(null); const [editing, setEditing] = useState<any>(null);
+  const wallets = useApi<any[]>(open && me ? '/wallets' : null, [open, me?.user.id]);
+  const strats = useApi<any[]>(open && me ? '/strategies' : null, [open, me?.user.id, created?.id]);
+  const w = (wallets.data ?? []).find(x => x.chain === chain && x.custody === (me?.settings.mode === 'live' ? 'hosted' : 'paper'));
+  const existing = (strats.data ?? []).find(x => x.kind === 'position_exit' && x.token === address && ['active', 'paused', 'draft'].includes(x.lifecycle));
   async function submit(activate: boolean) {
     setBusy(true);
     try {
-      const wallets = await api<any[]>('/wallets'); const w = wallets.find(x => x.chain === chain && x.custody === 'paper');
-      const params: any = kind === 'tp_sl' ? { stages: [{ percentBps: Math.round(Number(f.tp1pct) * 100), gain: f.tp1 }, ...(Number(f.tp2pct) > 0 ? [{ percentBps: Math.round(Number(f.tp2pct) * 100), gain: f.tp2 }] : [])], ...(f.sl ? { stopLoss: f.sl } : {}) }
-        : kind === 'trailing_tp' ? { activation: f.activation, retracement: f.retracement } : kind === 'trailing_sl' ? { retracement: f.retracement } : kind === 'limit_buy' ? { targetPrice: f.target, amount: f.amount } : { targetPrice: f.target };
-      const s = await api('/strategies', { method: 'POST', body: { kind, chain, tokenAddress: address, walletId: w.id, params } });
+      if (!w) throw new Error('No wallet for this mode on this chain');
+      const params: any = kind === 'plan' ? { exit: cfg } : kind === 'limit_buy' ? { targetPrice: f.target, amount: f.amount } : { targetPrice: f.target };
+      const s = await api('/strategies', { method: 'POST', body: { kind: kind === 'plan' ? 'position_exit' : kind, chain, tokenAddress: address, walletId: w.id, params } });
       if (activate) await api(`/strategies/${s.id}/activate`, { method: 'POST', body: {} });
-      setCreated(s); toast(activate ? 'Strategy active — the worker evaluates it every ~2s.' : 'Saved as draft.', 'ok');
+      setCreated(s); toast(activate ? (kind === 'plan' ? 'Exits on — JGG checks the price about every 2 seconds.' : 'Order active.') : 'Saved as draft.', 'ok');
     } catch (e) { toast(errMsg(e), 'err'); } finally { setBusy(false); }
   }
-  const inp = (k: keyof typeof f, label: string, hint?: string) => <label className="field"><span>{label}</span><input inputMode="decimal" value={f[k]} onChange={e => setF({ ...f, [k]: e.target.value.replace(/[^\d.]/g, '') })} />{hint && <small className="muted">{hint}</small>}</label>;
-  return <Drawer open={open} onClose={() => { setCreated(null); onClose(); }} title={`Automation · ${symbol}`}>
-    <Seg label="Strategy" value={kind} onChange={v => setKind(v as typeof kind)} items={[{ id: 'tp_sl', label: 'TP/SL' }, { id: 'trailing_tp', label: 'Trailing TP' }, { id: 'trailing_sl', label: 'Trailing SL' }, { id: 'limit_buy', label: 'Limit buy' }, { id: 'limit_sell', label: 'Limit sell' }]} />
-    <p className="muted small">Current price {price(priceNow)}. Exits apply to your known-basis position in your first paper wallet; entry = weighted-average cost.</p>
-    {kind === 'tp_sl' && <>{inp('tp1', 'TP1 gain (fraction, 0.5 = +50%)')}{inp('tp1pct', 'TP1 sells % of original')}{inp('tp2', 'TP2 gain')}{inp('tp2pct', 'TP2 sells %')}{inp('sl', 'Stop loss (fraction, 0.3 = −30%)', 'Stop sells all remaining')}</>}
-    {kind === 'trailing_tp' && <>{inp('activation', 'Activation a', 'Arms at entry × (1 + a)')}{inp('retracement', 'Retracement d', 'Fires once at peak × (1 − d)')}</>}
-    {kind === 'trailing_sl' && inp('retracement', 'Retracement d', 'Stop trails the high-water mark; never moves down')}
-    {(kind === 'limit_buy' || kind === 'limit_sell') && <>{inp('target', 'Target price (USD)')}{kind === 'limit_buy' && inp('amount', `Amount (${NATIVE[chain]})`)}</>}
-    <p className="note">Requires a configured risk policy (Settings → Risk). Default denies all automation. Kill switch: Settings or Portfolio.</p>
-    {created ? <p className="note ok">Created {created.kind} ({created.id}). <Link to="/portfolio?tab=strategies" className="link" onClick={onClose}>View strategies</Link></p> :
-      <div className="row gap end"><button className="btn ghost" disabled={busy} onClick={() => submit(false)}>Save draft</button><button className="btn buy" disabled={busy} onClick={() => submit(true)}>Activate</button></div>}
+  const inp = (k: keyof typeof f, label: string) => <label className="field"><span>{label}</span><input inputMode="decimal" value={f[k]} onChange={e => setF({ ...f, [k]: e.target.value.replace(/[^\d.]/g, '') })} /></label>;
+  return <Drawer open={open} onClose={() => { setCreated(null); onClose(); }} title={`Exits · ${symbol}`}>
+    <Seg label="Strategy" value={kind} onChange={v => setKind(v as typeof kind)} items={[{ id: 'plan', label: 'Exit plan' }, { id: 'limit_sell', label: 'Limit sell' }, { id: 'limit_buy', label: 'Limit buy' }]} />
+    {kind === 'plan' ? (existing ? <div className="note"><p>This coin already has an exit plan ({existing.lifecycle}).</p><button className="btn" onClick={() => setEditing(existing)}>Edit its exits</button></div>
+      : <>
+        <p className="muted small">Protects the tokens you bought on this coin. Numbers below use your actual average fill price.</p>
+        <ExitPlanEditor value={cfg} onChange={setCfg} ctx={w ? { chain, tokenAddress: address, walletId: w.id } : null} />
+      </>)
+      : <>{inp('target', 'Target price (USD)')}{kind === 'limit_buy' && inp('amount', `Amount (${NATIVE[chain]})`)}<p className="muted small">Current price {price(priceNow)}.</p></>}
+    <p className="note">Requires your risk limits (Settings → Risk). Kill switch stops all automation, including exits.</p>
+    {created ? <p className="note ok">Created. <Link to="/portfolio?tab=strategies" className="link" onClick={onClose}>View strategies</Link></p> :
+      !(kind === 'plan' && existing) && <div className="row gap end"><button className="btn ghost" disabled={busy} onClick={() => submit(false)}>Save draft</button><button className="btn buy" disabled={busy || (kind === 'plan' && validateExitConfig(cfg).length > 0)} onClick={() => submit(true)}>{kind === 'plan' ? 'Turn on exits' : 'Activate'}</button></div>}
+    {editing && <EditExitsDrawer c={editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); strats.reload(true); }} />}
   </Drawer>;
 }
 

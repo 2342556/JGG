@@ -68,7 +68,7 @@ with sync_playwright() as p:
     page.screenshot(path=f'{OUT}/flow_skill_run.png')
     # ---- Flow: strategy needs risk policy (deny by default)
     page.goto(BASE + f'/token/solana/{tok}'); page.wait_for_timeout(1200)
-    page.get_by_role('button', name='Set TP / SL / trailing').click(); page.wait_for_timeout(300)
+    page.get_by_role('button', name='Set exits', exact=True).click(); page.wait_for_timeout(300)
     page.locator('.drawer').get_by_role('radio', name='Limit buy').click()
     page.locator('.drawer').get_by_label('Target price (USD)').fill('0.0000001')
     page.locator('.drawer').get_by_role('button', name='Activate').click(); page.wait_for_timeout(700)
