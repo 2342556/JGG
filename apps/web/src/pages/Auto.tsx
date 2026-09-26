@@ -141,7 +141,7 @@ export function EditExitsDrawer({ c, onClose, onSaved }: { c: any; onClose: () =
   const [cfg, setCfg] = useState<ExitConfig>(() => cloneCfg(c.params.exit)); const [busy, setBusy] = useState(false);
   async function save() {
     setBusy(true);
-    try { await api(`/strategies/${c.id}/exit`, { method: 'PUT', body: { config: cfg, version: c.version } }); toast('Exit plan updated for this position', 'ok'); onSaved(); }
+    try { await api(`/strategies/${c.id}/exit`, { method: 'PUT', body: { config: cfg, version: c.params.exitVersion ?? 0 } }); toast('Exit plan updated for this position', 'ok'); onSaved(); }
     catch (e) { toast(errMsg(e), 'err'); } finally { setBusy(false); }
   }
   return <Drawer open onClose={onClose} title={`Exits · ${c.symbol ?? short(c.token)}`}>

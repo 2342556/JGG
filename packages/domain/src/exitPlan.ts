@@ -113,6 +113,7 @@ export type ExitState = {
   seq: number; failures: number; retryAfter: number;
   lastPrice: { usd: string; at: number } | null; staleSince: number | null;
   closeReason: string | null;
+  reservedWaitSince?: number | null; // a triggered sale is waiting for tokens reserved by another order (logged once per episode)
 };
 export type ExitEvent = { kind: string; detail: Record<string, unknown> };
 export type Observation = {
@@ -210,12 +211,16 @@ export function decideExit(prev: ExitState, o: Observation, idPrefix: string): S
       if (s.trailing.status === 'waiting' && c.trailing.activation === 'after_partial') { s.trailing = { status: 'active', peak: price, trigger: trailingTrigger(price, c.trailing.pct), activatedAt: o.priceAt! }; ev.push({ kind: 'trailing_activated', detail: { mode: 'after_partial', reason: 'PARTIAL_SKIPPED', price, trigger: s.trailing.trigger } }); }
     } else { plan = { rule: 'partial_tp', qty, trigger: trig }; ev.push({ kind: 'partial_triggered', detail: { price, trigger: trig, heldQty: s.managedQty, sellPct: c.partialTp.sellPct, qty } }); }
   }
-  if (!plan) return { state: s, events: ev, order: null };
+  if (!plan) { s.reservedWaitSince = null; return { state: s, events: ev, order: null }; }
   // Tokens reserved by another pending order (e.g. an unapproved manual sell) are held but not sellable right now.
   const avail = floorQty(max('0', o.availableQty ?? o.heldQty), s.decimals);
   if (lt(avail, plan.qty)) {
     if (plan.rule === 'partial_tp' || !gt(avail, '0') || (o.dustQty && lt(avail, o.dustQty))) {
       if (plan.rule === 'partial_tp') s.partial = 'armed';
+      if (s.reservedWaitSince) { // same episode: stay quiet (no repeated trigger/wait lines every tick)
+        return { state: s, events: ev.filter(e => e.kind !== 'stop_triggered' && e.kind !== 'partial_triggered'), order: null };
+      }
+      s.reservedWaitSince = o.now;
       ev.push({ kind: 'waiting_reserved', detail: { rule: plan.rule, needed: plan.qty, available: avail, note: 'Tokens are reserved by another pending order; waiting instead of selling less (partial) or nothing (stop).' } });
       return { state: s, events: ev, order: null };
     }
@@ -223,7 +228,7 @@ export function decideExit(prev: ExitState, o: Observation, idPrefix: string): S
     plan = { ...plan, qty: avail };
   }
   if (plan.rule !== 'partial_tp' && (!gt(plan.qty, '0') || (o.dustQty && lt(plan.qty, o.dustQty)))) { ev.push({ kind: 'dust_remainder', detail: { qty: plan.qty, dustQty: o.dustQty ?? '0' } }); close(s, 'DUST_REMAINDER', ev); return { state: s, events: ev, order: null }; }
-  s.seq += 1;
+  s.seq += 1; s.reservedWaitSince = null;
   const order: PendingExit = { id: `${idPrefix}:${RULE_TAG[plan.rule]}:${s.seq}`, rule: plan.rule, qty: plan.qty, triggerPrice: plan.trigger, observedPrice: price, plannedAt: o.now };
   s.pending = order; if (plan.rule === 'partial_tp') s.partial = 'pending';
   ev.push({ kind: 'order_planned', detail: { ...order } });

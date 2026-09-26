@@ -186,8 +186,9 @@ test('API services: presets CRUD, exact preview for a manual position, override 
   // manual position exit via the API path (entry/qty from the real position) + override
   const s = S.createStrategy(db, u, { kind: 'position_exit', chain: 'solana', tokenAddress: tok.address, walletId: w, params: { exit: CFG } }, NOW);
   assert.equal(s.params.entrySource, 'fills'); assert.ok(D.eq(s.state.entry, D.rescale(fill, 18)));
-  assert.throws(() => X.overrideExit(db, u, s.id, { config: CFG, version: s.version + 5 }, NOW), /changed since you opened it/);
-  const v2 = X.overrideExit(db, u, s.id, { config: { ...CFG, stopLoss: { enabled: true, pct: '10' } }, version: s.version }, NOW);
+  assert.throws(() => X.overrideExit(db, u, s.id, { config: CFG, version: 5 }, NOW), /edited elsewhere/);
+  const v2 = X.overrideExit(db, u, s.id, { config: { ...CFG, stopLoss: { enabled: true, pct: '10' } }, version: 0 }, NOW);
+  assert.equal(v2.params.exitVersion, 1);
   assert.equal(v2.exit!.levels.stopLoss, D.stopLossPrice(s.state.entry, '10'));
   assert.throws(() => S.createStrategy(db, u, { kind: 'position_exit', chain: 'solana', tokenAddress: TOKENS[15].address, walletId: w, params: { exit: CFG } }, NOW), /No position/);
 });
@@ -247,7 +248,7 @@ test('R3 fixed: legacy TP/SL stop that could not be sent keeps protecting and se
 test('R4 fixed: an owner edit made during an evaluation is never overwritten by the worker', () => {
   const e = setup(21);
   const row = q1(e.db, `SELECT * FROM strategies WHERE id = ?`, e.s.id);
-  X.overrideExit(e.db, e.u, e.s.id, { config: { ...CFG, stopLoss: { enabled: true, pct: '5' } }, version: e.view().version }, NOW);
+  X.overrideExit(e.db, e.u, e.s.id, { config: { ...CFG, stopLoss: { enabled: true, pct: '5' } }, version: 0 }, NOW);
   assert.equal(X.evalPositionExit(e.db, row, NOW + 1000), 'conflict_retry');
   assert.equal(e.view().state.config.stopLoss.pct, '5'); assert.equal(e.view().exit!.levels.stopLoss, '95');
   assert.equal(e.tick('94'), 'exit_stop_loss', 'the owner\'s tighter stop is what fires');
@@ -278,14 +279,17 @@ test('R6 fixed: a price observed before trailing activation never sets the peak'
   assert.equal(step.state.trailing.peak, '210'); assert.equal(step.state.trailing.trigger, '168');
 });
 
-test('R7 fixed: crash after the sell intent was created but before approval → recovery approves and sells once', () => {
+test('R7 fixed: crash after the sell intent was created but before approval → recovery expires it and re-decides; sells once', () => {
   const e = setup(24);
   X._testHooks.crash = 'after_plan'; try { e.tick('70'); } finally { X._testHooks.crash = null; }
   const eo = q1(e.db, `SELECT id, qty FROM exit_orders WHERE strategy_id = ?`, e.s.id);
   const q = T.createQuote(e.db, e.u, { chain: 'solana', tokenAddress: e.tok.address, side: 'sell', amount: eo.qty, slippageBps: 500, walletId: e.w }, e.t + 1000);
   T.createIntent(e.db, e.u, { quoteId: q.id, source: 'strategy', strategyId: e.s.id }, e.t + 1000, `${eo.id}:intent`); // what submit() did before dying
-  assert.match(e.tick('70')!, /closed:STOP_LOSS|exit_stop_loss/);
-  assert.ok(e.events().some(x => x.kind === 'exit.recovered_approval')); assert.equal(e.held(), '0'); assert.equal(e.sells().length, 1);
+  e.tick('70'); // recovery: the unapproved intent is expired (reservation released), never approved outside the risk path
+  assert.ok(e.events().some(x => x.kind === 'exit.recovered_unapproved_expired'));
+  assert.equal(q1(e.db, `SELECT reserved FROM paper_balances WHERE wallet_id = ? AND asset = ?`, e.w, e.tok.address).reserved, '0');
+  assert.equal(e.tick('70', { dt: 3000 }), 'exit_stop_loss', 're-decided through the full risk path; sells once');
+  assert.equal(e.held(), '0'); assert.equal(e.sells().length, 1);
 });
 
 test('R8 fixed: a future-dated price is treated as stale and cannot block later real prices', () => {
@@ -293,4 +297,55 @@ test('R8 fixed: a future-dated price is treated as stale and cannot block later 
   assert.equal(e.tick({ usd: '150', at: NOW + 3_600_000, source: 'skewed', staleReason: null }), 'waiting');
   assert.equal(e.events().find(x => x.kind === 'exit.price_stale')?.detail.reason, 'PRICE_FROM_FUTURE');
   assert.equal(e.tick('10'), 'exit_stop_loss', 'the next real price still triggers the stop');
+});
+
+// ---------------- Second review round (N1–N8) ----------------
+test('N8 fixed: routine price ticks do not invalidate the owner\'s edit (edits have their own version)', () => {
+  const e = setup(26);
+  for (const p of ['110', '120', '130', '140']) e.tick(p); // worker writes while the owner is editing
+  const v = X.overrideExit(e.db, e.u, e.s.id, { config: { ...CFG, stopLoss: { enabled: true, pct: '10' } }, version: 0 }, NOW);
+  assert.equal(v.exit!.levels.stopLoss, '90');
+  assert.throws(() => X.overrideExit(e.db, e.u, e.s.id, { config: CFG, version: 0 }, NOW), /edited elsewhere/, 'a second editor with the old version is refused');
+});
+
+test('N2 fixed: a pause/cancel that lands between the write-ahead and sending means nothing is sent', () => {
+  const e = setup(28);
+  const row = q1(e.db, `SELECT * FROM strategies WHERE id = ?`, e.s.id);
+  S._testing.setPriceOverride(() => '70');
+  X._testHooks.afterPlanCommit = () => S.setStrategyLifecycle(e.db, e.u, e.s.id, 'pause', e.t); // the API process pauses the plan in that window
+  let out: string;
+  try { out = X.evalPositionExit(e.db, row, NOW + 1000); } finally { X._testHooks.afterPlanCommit = null; }
+  assert.equal(out, 'conflict_retry'); const paused = e.view().lifecycle === 'paused';
+  assert.equal(q1(e.db, `SELECT state, reason FROM exit_orders WHERE strategy_id = ?`, e.s.id).reason, 'NOT_SENT_PLAN_CHANGED');
+  assert.ok(paused); assert.equal(e.sells().length, 0, 'nothing sent'); assert.equal(e.held(), '100');
+});
+
+test('N3 fixed: a legacy TP/SL and a new exit plan cannot both manage the same coin', () => {
+  const e = setup(29);
+  assert.throws(() => S.createStrategy(e.db, e.u, { kind: 'tp_sl', chain: 'solana', tokenAddress: e.tok.address, walletId: e.w, params: { stopLoss: '0.2', entryUsd: '100', qty: '100' } }, NOW), /already has an exit plan/);
+  S.setStrategyLifecycle(e.db, e.u, e.s.id, 'cancel', e.t);
+  const legacy = S.createStrategy(e.db, e.u, { kind: 'tp_sl', chain: 'solana', tokenAddress: e.tok.address, walletId: e.w, params: { stopLoss: '0.2', entryUsd: '100', qty: '100' } }, NOW);
+  assert.throws(() => S.createStrategy(e.db, e.u, { kind: 'position_exit', chain: 'solana', tokenAddress: e.tok.address, walletId: e.w, params: { exit: CFG, entryUsd: '100', qty: '100' } }, NOW), /already has an exit plan/);
+  void legacy;
+});
+
+test('N5 fixed: an interrupted paper order with simulated-chain evidence is reconciled, not expired', () => {
+  const e = setup(30);
+  e.tick('70', { fault: 'timeout_after_dispatch' }); // paper_chain has the landed truth
+  const o = q1(e.db, `SELECT id FROM orders WHERE strategy_id = ?`, e.s.id);
+  run(e.db, `UPDATE orders SET state = 'submitting', tx_ref = NULL WHERE id = ?`, o.id); // emulate: died after the paper_chain write
+  assert.equal(T.expireInterruptedPaperOrders(e.db, e.t + 60_000), 1);
+  assert.equal(q1(e.db, `SELECT state FROM orders WHERE id = ?`, o.id).state, 'reconciliation_required');
+  T.reconcileOrder(e.db, e.u, o.id, e.t + 61_000);
+  assert.equal(q1(e.db, `SELECT state FROM orders WHERE id = ?`, o.id).state, 'finalized', 'the simulated landing is honored');
+  assert.match(e.tick('70', { dt: 61_000 })!, /closed:STOP_LOSS|waiting/); assert.equal(e.sells().length, 1, 'no second sale');
+});
+
+test('N7 fixed: a stop blocked by reserved tokens logs and notifies once per episode', () => {
+  const e = setup(31);
+  run(e.db, `UPDATE paper_balances SET reserved = '100' WHERE wallet_id = ? AND asset = ?`, e.w, e.tok.address);
+  for (let k = 0; k < 5; k++) e.tick('50');
+  assert.equal(e.events().filter(x => x.kind === 'exit.waiting_reserved').length, 1);
+  assert.equal(e.events().filter(x => x.kind === 'exit.stop_triggered').length, 1);
+  assert.equal(qa(e.db, `SELECT 1 FROM notifications WHERE user_id = ? AND title = 'Exit waiting — tokens reserved'`, e.u).length, 1);
 });

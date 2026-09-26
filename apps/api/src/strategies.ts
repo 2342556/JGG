@@ -9,7 +9,7 @@ import { CHAIN_META, type Chain } from '../../../packages/contracts/src/index.ts
 import { findFixtureToken, fixtureTokens, fixtureTrades, priceAt, num } from '../../../packages/test-fixtures/src/index.ts';
 import { finderCandidates } from '../../../packages/providers/src/market.ts';
 import { getMarketSource, nativeUsdOf, type PriceObs } from '../../../packages/providers/src/execution.ts';
-import { initialExitState, evalPositionExit, hasUncertainOrderFor } from './exits.ts';
+import { initialExitState, evalPositionExit, hasUncertainOrderFor, EXIT_KINDS_SQL } from './exits.ts';
 import { getMode, tradingModeOrThrow, audit, notify, outbox, createQuote, createIntent, approveIntent, executeIntent } from './trading.ts';
 
 // ---------------- Risk policy (deny-by-default) ----------------
@@ -129,6 +129,8 @@ export function createStrategy(db: DB, userId: string, body: { kind: string; cha
         state = { phase: 'waiting', epoch: 0 }; break;
       case 'limit_sell': need('targetPrice'); state = { phase: 'waiting', epoch: 0 }; break;
       case 'tp_sl': case 'trailing_tp': case 'trailing_sl': {
+        const dupe = q1(db, `SELECT id FROM strategies WHERE user_id = ? AND wallet_id = ? AND chain = ? AND token = ? AND kind IN (${EXIT_KINDS_SQL}) AND lifecycle IN ('active','paused','draft')`, userId, body.walletId, body.chain, token);
+        if (dupe) throw new ApiError('VERSION_CONFLICT', 'This coin already has an exit plan in this wallet — edit or cancel it first (two plans would both sell the same tokens).', 409, false, { code: 'EXIT_PLAN_EXISTS', strategyId: dupe.id });
         if (body.kind === 'tp_sl' && !p.stages?.length && !p.stopLoss) throw new ApiError('VALIDATION_FAILED', 'Provide TP stages and/or stopLoss', 400);
         if (body.kind !== 'tp_sl') need('retracement');
         const qty = p.qty ?? null; const entry = p.entryUsd ?? null;
@@ -507,7 +509,7 @@ function evalAutoTrader(db: DB, s: any, p: any, st: any, now: number, fault?: an
   const src = getMarketSource(); const live = src && src.kind !== 'fixture';
   const res = live ? D.runFinder(src!.finderCandidates(s.chain, now), src!.finderConfig, src!.finderExclude) : D.runFinder(finderCandidates(s.chain, now));
   // Skip coins this wallet already holds or already protects with an exit plan (one plan per coin per wallet).
-  const held = new Set(qa(db, `SELECT token FROM strategies WHERE user_id = ? AND wallet_id = ? AND kind = 'position_exit' AND lifecycle IN ('active','paused','draft')`, s.user_id, s.wallet_id).map(r => r.token as string));
+  const held = new Set(qa(db, `SELECT token FROM strategies WHERE user_id = ? AND wallet_id = ? AND kind IN (${EXIT_KINDS_SQL}) AND lifecycle IN ('active','paused','draft')`, s.user_id, s.wallet_id).map(r => r.token as string));
   const pick = res.passed.find(c => c.score >= (p.minScore ?? 50) && !st.bought[c.address] && !held.has(c.address));
   const decision = { at: new Date(now).toISOString(), scanned: res.scanned, passed: res.passed.length, excluded: res.excluded, pick: pick ? { address: pick.address, symbol: pick.symbol, score: pick.score, reasons: pick.reasons } : null };
   st.decisions = [decision, ...(st.decisions ?? [])].slice(0, 20);

@@ -373,6 +373,8 @@ export function expireInterruptedPaperOrders(db: DB, now: number, olderThanMs = 
   const rows = qa(db, `SELECT id, user_id, intent_id FROM orders WHERE mode != 'live' AND state = 'submitting' AND updated_at < ? LIMIT 100`, now - olderThanMs);
   for (const o of rows) tx(db, () => {
     orderTransition(db, o.id, 'reconciliation_required', { reason: 'PAPER_DISPATCH_INTERRUPTED' }, now);
+    const pc = q1(db, `SELECT tx_ref FROM paper_chain WHERE order_id = ?`, o.id);
+    if (pc) { run(db, `UPDATE orders SET tx_ref = COALESCE(tx_ref, ?) WHERE id = ?`, pc.tx_ref, o.id); return; } // simulated chain has a record: reconcileOrder applies that truth
     orderTransition(db, o.id, 'expired', { reason: 'PAPER_DISPATCH_INTERRUPTED', note: 'In-process simulator never produced an outcome; nothing executed.' }, now);
     const i = q1(db, `SELECT * FROM trade_intents WHERE id = ?`, o.intent_id);
     if (i?.reservation_id) releaseReservation(db, i.reservation_id);

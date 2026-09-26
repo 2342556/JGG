@@ -16,11 +16,14 @@ import * as D from '../../../packages/domain/src/index.ts';
 import { type Chain } from '../../../packages/contracts/src/index.ts';
 import { findFixtureToken } from '../../../packages/test-fixtures/src/index.ts';
 import { getMarketSource, paperQuote, type PriceObs } from '../../../packages/providers/src/execution.ts';
-import { notify, audit, executeIntent, approveIntent, outbox } from './trading.ts';
-import { submit, strategyEvent, observePrice, positionOf, strategyView, getRiskPolicy } from './strategies.ts';
+import { notify, audit, executeIntent, outbox, transitionIntent, releaseReservation } from './trading.ts';
+import { submit, strategyEvent, observePrice, positionOf, strategyView } from './strategies.ts';
 
 /** Tests only: simulate a process crash at a precise point (after the write-ahead commit / after the order was sent). */
-export const _testHooks: { crash: null | 'after_plan' | 'after_submit' } = { crash: null };
+export const _testHooks: { crash: null | 'after_plan' | 'after_submit'; afterPlanCommit?: (() => void) | null } = { crash: null, afterPlanCommit: null };
+/** Every strategy kind that sells a position's tokens on its own triggers: at most one per coin per wallet. */
+export const EXIT_KINDS = ['position_exit', 'tp_sl', 'trailing_tp', 'trailing_sl'] as const;
+export const EXIT_KINDS_SQL = EXIT_KINDS.map(k => `'${k}'`).join(',');
 export const EXIT_STALE_MS = 30_000;   // a price older than this never triggers a sale
 export const DUST_USD = '0.01';        // below this value a sale is not attempted (and the remainder is reported as dust)
 
@@ -45,9 +48,13 @@ export function manualPositionEntry(db: DB, userId: string, walletId: string, ch
   return { entry: D.str(D.rescale(D.div(lot.known_basis, lot.known_qty, 18), 18)), qty, basis: 'average_cost' };
 }
 
+function expireIntent(db: DB, intentId: string, now: number) {
+  const i = q1(db, `SELECT state, reservation_id FROM trade_intents WHERE id = ?`, intentId); if (!i || i.state !== 'awaiting_approval') return;
+  transitionIntent(db, intentId, 'expired', 'EXIT_RECOVERY', now); if (i.reservation_id) releaseReservation(db, i.reservation_id);
+}
 /** Create the state for a new position_exit strategy (called from createStrategy). */
 export function initialExitState(db: DB, userId: string, walletId: string, chain: string, token: string, p: any) {
-  const dup = q1(db, `SELECT id FROM strategies WHERE user_id = ? AND wallet_id = ? AND chain = ? AND token = ? AND kind = 'position_exit' AND lifecycle IN ('active','paused','draft')`, userId, walletId, chain, token);
+  const dup = q1(db, `SELECT id FROM strategies WHERE user_id = ? AND wallet_id = ? AND chain = ? AND token = ? AND kind IN (${EXIT_KINDS_SQL}) AND lifecycle IN ('active','paused','draft')`, userId, walletId, chain, token);
   if (dup) throw new ApiError('VERSION_CONFLICT', 'This coin already has an exit plan in this wallet — edit that plan instead (two plans would both sell the same tokens).', 409, false, { code: 'EXIT_PLAN_EXISTS', strategyId: dup.id });
   const cfg = D.normalizeExitConfig(p.exit);
   const issues = D.validateExitConfig(cfg);
@@ -66,9 +73,11 @@ export function initialExitState(db: DB, userId: string, walletId: string, chain
 /** Optimistic write: only if nobody (owner edit, pause, cancel, kill switch) changed the plan since this evaluation read it. */
 class WriteConflict extends Error {}
 function saveStrategy(db: DB, s: any, st: D.ExitState, lifecycle: string, reason: string | null, now: number) {
+  const json = JSON.stringify(st);
+  if (json === s.state && lifecycle === s.lifecycle && (reason === null || reason === s.reason)) return; // nothing changed: no write, no version bump
   const n = Number(run(db, `UPDATE strategies SET state = ?, lifecycle = ?, reason = COALESCE(?, reason), version = version + 1, updated_at = ? WHERE id = ? AND version = ?`, JSON.stringify(st), lifecycle, reason, now, s.id, s.version).changes);
   if (n !== 1) throw new WriteConflict('STRATEGY_CHANGED_DURING_EVALUATION');
-  s.version += 1; outbox(db, s.user_id, `strategies:${s.user_id}`, { id: s.id, lifecycle });
+  s.version += 1; s.state = json; s.lifecycle = lifecycle; if (reason !== null) s.reason = reason; outbox(db, s.user_id, `strategies:${s.user_id}`, { id: s.id, lifecycle });
 }
 type Row = any;
 const symOf = (db: DB, s: Row): string => findFixtureToken(s.chain, s.token)?.symbol ?? q1(db, `SELECT symbol FROM live_tokens WHERE mint = ?`, s.token)?.symbol ?? String(s.token).slice(0, 6);
@@ -106,11 +115,21 @@ function resolvePending(db: DB, s: Row, st: D.ExitState, now: number, fresh: boo
     if (i?.order_id) { run(db, `UPDATE exit_orders SET intent_id = ?, order_id = ?, state = 'submitted', updated_at = ? WHERE id = ?`, intent.id, i.order_id, now, p.id); strategyEvent(db, s.id, 'exit.recovered_order', { id: p.id, orderId: i.order_id }, null, now);
       return orderOutcome(q1(db, `SELECT state, amount_in, error FROM orders WHERE id = ?`, i.order_id), p.id); }
     try { // intent exists but never executed: approve under the stored grant if the crash came before approval, then execute idempotently
-      if (i?.state === 'awaiting_approval') { const pol = getRiskPolicy(db, s.user_id); approveIntent(db, s.user_id, intent.id, { maxSlippageBps: pol.policy.maxSlippageBps || 1500 }, now, `strategy:${s.id}`); strategyEvent(db, s.id, 'exit.recovered_approval', { id: p.id, intentId: intent.id }, null, now); }
+      if (i?.state === 'awaiting_approval') { // crash before approval: expire it (releasing its reservation) and re-decide through the full risk path
+        expireIntent(db, intent.id, now); strategyEvent(db, s.id, 'exit.recovered_unapproved_expired', { id: p.id, intentId: intent.id }, null, now);
+        return { id: p.id, outcome: 'failed', reason: 'NOT_SENT_BEFORE_APPROVAL' };
+      }
       const o = executeIntent(db, s.user_id, intent.id, now, `${p.id}:exec`, fault ?? 'none', `strategy:${s.id}`);
       run(db, `UPDATE exit_orders SET intent_id = ?, order_id = ?, state = 'submitted', updated_at = ? WHERE id = ?`, intent.id, o.id, now, p.id);
       return orderOutcome(q1(db, `SELECT state, amount_in, error FROM orders WHERE id = ?`, o.id), p.id);
     } catch (e) { return { id: p.id, outcome: 'failed', reason: `NOT_SENT:${(e as any).code ?? 'ERROR'}` }; }
+  }
+  // The owner may have paused/cancelled/edited in the other process since this evaluation's write-ahead: never send after that.
+  const cur = q1(db, `SELECT version, lifecycle FROM strategies WHERE id = ?`, s.id);
+  if (!cur || cur.version !== s.version || cur.lifecycle !== 'active') {
+    run(db, `UPDATE exit_orders SET state = 'failed', reason = 'NOT_SENT_PLAN_CHANGED', updated_at = ? WHERE id = ?`, now, p.id);
+    strategyEvent(db, s.id, 'exit.not_sent', { id: p.id, code: 'NOT_SENT_PLAN_CHANGED', lifecycle: cur?.lifecycle }, null, now);
+    throw new WriteConflict('PLAN_CHANGED_BEFORE_SEND');
   }
   const r = submit(db, s, { side: 'sell', amount: p.qty, key: p.id, riskReducing: true }, now, fault);
   if (_testHooks.crash === 'after_submit') throw new Error('SIMULATED_CRASH_AFTER_SUBMIT');
@@ -161,6 +180,7 @@ function evalPositionExitInner(db: DB, s: Row, now: number, fault?: any): string
   const obs = observe(db, s, st, now);
   const step = D.decideExit(st, obs, s.id);
   log(db, s, step.events, now, obs.price ? { price: obs.price } : {});
+  if (step.events.some(e => e.kind === 'waiting_reserved')) notify(db, s.user_id, 'unprotected', 'Exit waiting — tokens reserved', `${symOf(db, s)}: a ${step.events.find(e => e.kind === 'waiting_reserved')!.detail.rule as string} triggered but the tokens are held by another pending order. Approve or cancel that order.`, `resv:${s.id}:${step.state.reservedWaitSince}`);
   if (step.events.some(e => e.kind === 'price_stale')) notify(db, s.user_id, 'unprotected', 'Exit protection waiting for a price', `${symOf(db, s)}: ${obs.staleReason ?? 'price unavailable'}. Nothing is sold on an old price; exits resume when a fresh price arrives.`, `stale:${s.id}:${step.state.staleSince}`);
   st = step.state;
   if (!step.order) { saveStrategy(db, s, st, st.status === 'closed' ? 'completed' : 'active', st.status === 'closed' ? st.closeReason : null, now); return st.status === 'closed' ? `closed:${st.closeReason}` : 'waiting'; }
@@ -172,6 +192,7 @@ function evalPositionExitInner(db: DB, s: Row, now: number, fault?: any): string
   });
   audit(db, s.user_id, `strategy:${s.id}`, 'exit.plan', { id: o.id, rule: o.rule, qty: o.qty, trigger: o.triggerPrice, price: o.observedPrice, mode: s.mode });
   if (_testHooks.crash === 'after_plan') throw new Error('SIMULATED_CRASH_AFTER_PLAN');
+  _testHooks.afterPlanCommit?.(); // tests: another process acts in the window between the write-ahead commit and sending
   const r = resolvePending(db, s, st, now, true, fault);
   if (!r) { saveStrategy(db, s, st, 'active', 'PENDING_SETTLEMENT', now); return `pending:${o.rule}`; }
   st = settle(db, s, st, r, now);
@@ -240,12 +261,13 @@ export function overrideExit(db: DB, userId: string, id: string, body: { config:
   return tx(db, () => {
     const s = q1(db, `SELECT * FROM strategies WHERE id = ? AND user_id = ?`, id, userId);
     if (!s || s.kind !== 'position_exit') throw new ApiError('NOT_FOUND', 'Exit plan not found', 404);
-    if (body.version !== s.version) throw new ApiError('VERSION_CONFLICT', 'This position changed since you opened it; reload and review the new numbers', 409, true);
+    const p0 = JSON.parse(s.params);
+    if (body.version !== (p0.exitVersion ?? 0)) throw new ApiError('VERSION_CONFLICT', 'This plan was edited elsewhere since you opened it; reload and review the new numbers', 409, true);
     const cfg = D.normalizeExitConfig(body.config); const issues = D.validateExitConfig(cfg);
     if (issues.length) throw new ApiError('VALIDATION_FAILED', issues.map(i => i.message).join('; '), 400, false, { issues });
     let step: D.Step;
     try { step = D.overrideExitConfig(JSON.parse(s.state), cfg, now); } catch (e) { throw new ApiError('INVALID_TRANSITION', (e as Error).message, 409); }
-    const p = JSON.parse(s.params); p.exit = cfg;
+    const p = p0; p.exit = cfg; p.exitVersion = (p0.exitVersion ?? 0) + 1;
     run(db, `UPDATE strategies SET params = ?, state = ?, version = version + 1, updated_at = ? WHERE id = ?`, JSON.stringify(p), JSON.stringify(step.state), now, id);
     log(db, s, step.events, now);
     audit(db, userId, 'user', 'exit.override', { id, config: cfg });
