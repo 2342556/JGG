@@ -6,3 +6,4 @@ export * from './strategies.ts';
 export * from './copyRisk.ts';
 export * from './analytics.ts';
 export * from './finder.ts';
+export * from './exitPlan.ts';
