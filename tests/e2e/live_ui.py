@@ -1,7 +1,16 @@
 """Live-mode UI check (seeded pump-shaped data): pages render live shapes, unsupported views say so, auto trader buys a live coin."""
 import sys, json, re
 from playwright.sync_api import sync_playwright
-BASE = sys.argv[1]; GOOD = sys.argv[2]
+BASE = sys.argv[1]; GOOD = sys.argv[2]; DB = sys.argv[3] if len(sys.argv) > 3 else None
+import sqlite3, time
+def indexer_alive():
+    """Stand-in for a running indexer: fresh heartbeat (stream live) and fresh SOL/USD, so exit prices count as fresh."""
+    if not DB: return
+    c = sqlite3.connect(DB, timeout=10); now = int(time.time() * 1000)
+    c.execute("INSERT INTO worker_state (key, value, updated_at) VALUES ('indexer', ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at", (json.dumps({'conn': 'live', 'liveSince': None}), now))
+    r = c.execute("SELECT value FROM worker_state WHERE key = 'sol_usd'").fetchone()
+    if r: v = json.loads(r[0]); v['at'] = now; c.execute("UPDATE worker_state SET value = ?, updated_at = ? WHERE key = 'sol_usd'", (json.dumps(v), now))
+    c.commit(); c.close()
 res = {'errors': [], 'overflow': [], 'checks': {}}
 with sync_playwright() as p:
     b = p.chromium.launch()
@@ -28,7 +37,8 @@ with sync_playwright() as p:
             pg.goto(BASE + '/auto'); pg.wait_for_timeout(1000)
             res['checks']['finder_rows'] = pg.locator('.finder-row').count()
             pg.get_by_text('Fine-tune the numbers').click(); pg.get_by_label('Min quality score').fill('40')  # the seeded coin scores 45; default 50 correctly buys nothing
-            pg.get_by_role('button', name='Start auto trader', exact=True).click(); pg.wait_for_timeout(6000)
+            indexer_alive()
+            pg.get_by_role('button', name='Start auto trader', exact=True).click(); pg.wait_for_timeout(1500); indexer_alive(); pg.wait_for_timeout(4500)
             res['checks']['auto_positions'] = pg.locator('.pos-list li').count()
             res['checks']['auto_first_position'] = pg.locator('.pos-list li').first.inner_text()[:60] if res['checks']['auto_positions'] else None
             pg.screenshot(path='docs/screenshots/live_1440_auto_running.png', full_page=True)

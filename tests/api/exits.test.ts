@@ -349,3 +349,17 @@ test('N7 fixed: a stop blocked by reserved tokens logs and notifies once per epi
   assert.equal(e.events().filter(x => x.kind === 'exit.stop_triggered').length, 1);
   assert.equal(qa(e.db, `SELECT 1 FROM notifications WHERE user_id = ? AND title = 'Exit waiting — tokens reserved'`, e.u).length, 1);
 });
+
+test('auto trader never opens a position its exit plan cannot protect (stale exit price → no buy, named reason)', () => {
+  const db = openDb(':memory:'); const u = createUser(db, 'demo', Date.now(), 'u'); T.setMode(db, u, 'paper', NOW); S.setRiskPolicy(db, u, POLICY, undefined);
+  const w = q1(db, `SELECT id FROM wallets WHERE user_id = ? AND chain = 'solana' AND label = 'Paper 1'`, u).id as string;
+  S._testing.setPriceOverride(() => ({ usd: '1', at: null, source: 'test', staleReason: 'INDEXER_DOWN' }));
+  const a = S.createStrategy(db, u, { kind: 'auto_trader', chain: 'solana', walletId: w, params: { amount: '0.1', minScore: 0, maxPositions: 1, exit: CFG } }, NOW);
+  S.evaluateAll(db, 'w', NOW + 60_000);
+  const d1 = S.strategyView(db, u, a.id).state.decisions[0];
+  assert.equal(d1.pick, null); assert.ok(d1.passed > 0 && d1.excluded.exit_price_not_fresh >= 1);
+  assert.equal(q1(db, `SELECT COUNT(*) n FROM orders WHERE strategy_id = ?`, a.id).n, 0);
+  S._testing.setPriceOverride(() => undefined as any); // fresh prices again
+  S.evaluateAll(db, 'w', NOW + 120_000);
+  assert.ok(S.strategyView(db, u, a.id).state.decisions[0].pick, 'buys once protection can work');
+});

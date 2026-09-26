@@ -510,8 +510,14 @@ function evalAutoTrader(db: DB, s: any, p: any, st: any, now: number, fault?: an
   const res = live ? D.runFinder(src!.finderCandidates(s.chain, now), src!.finderConfig, src!.finderExclude) : D.runFinder(finderCandidates(s.chain, now));
   // Skip coins this wallet already holds or already protects with an exit plan (one plan per coin per wallet).
   const held = new Set(qa(db, `SELECT token FROM strategies WHERE user_id = ? AND wallet_id = ? AND kind IN (${EXIT_KINDS_SQL}) AND lifecycle IN ('active','paused','draft')`, s.user_id, s.wallet_id).map(r => r.token as string));
-  const pick = res.passed.find(c => c.score >= (p.minScore ?? 50) && !st.bought[c.address] && !held.has(c.address));
-  const decision = { at: new Date(now).toISOString(), scanned: res.scanned, passed: res.passed.length, excluded: res.excluded, pick: pick ? { address: pick.address, symbol: pick.symbol, score: pick.score, reasons: pick.reasons } : null };
+  // Never open a position the exit plan cannot protect yet: the exit price for the coin must be fresh right now.
+  let unprotectable = 0;
+  const pick = res.passed.find(c => {
+    if (!(c.score >= (p.minScore ?? 50) && !st.bought[c.address] && !held.has(c.address))) return false;
+    if (p.exit && observePrice(s.chain, c.address, now).staleReason) { unprotectable++; return false; }
+    return true;
+  });
+  const decision = { at: new Date(now).toISOString(), scanned: res.scanned, passed: res.passed.length, excluded: unprotectable ? { ...res.excluded, exit_price_not_fresh: unprotectable } : res.excluded, pick: pick ? { address: pick.address, symbol: pick.symbol, score: pick.score, reasons: pick.reasons } : null };
   st.decisions = [decision, ...(st.decisions ?? [])].slice(0, 20);
   if (!pick) { save(db, s, st, 'active', null, now); return 'no_candidate'; }
   st.bought[pick.address] = now; // never chase the same token twice (also if the buy fails)

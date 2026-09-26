@@ -78,3 +78,4 @@ test('position exit on live-shaped data (paper): buy on the curve, stop-loss fir
     assert.equal(q1(db, `SELECT qty FROM paper_balances WHERE wallet_id = ? AND asset = ?`, w, mint).qty, '0');
   } finally { setMarketSource(null); }
 });
+
