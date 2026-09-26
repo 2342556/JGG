@@ -16,8 +16,8 @@ import * as D from '../../../packages/domain/src/index.ts';
 import { type Chain } from '../../../packages/contracts/src/index.ts';
 import { findFixtureToken } from '../../../packages/test-fixtures/src/index.ts';
 import { getMarketSource, paperQuote, type PriceObs } from '../../../packages/providers/src/execution.ts';
-import { notify, audit, executeIntent } from './trading.ts';
-import { submit, strategyEvent, saveStrategy, observePrice, positionOf, strategyView } from './strategies.ts';
+import { notify, audit, executeIntent, approveIntent, outbox } from './trading.ts';
+import { submit, strategyEvent, observePrice, positionOf, strategyView, getRiskPolicy } from './strategies.ts';
 
 /** Tests only: simulate a process crash at a precise point (after the write-ahead commit / after the order was sent). */
 export const _testHooks: { crash: null | 'after_plan' | 'after_submit' } = { crash: null };
@@ -47,6 +47,8 @@ export function manualPositionEntry(db: DB, userId: string, walletId: string, ch
 
 /** Create the state for a new position_exit strategy (called from createStrategy). */
 export function initialExitState(db: DB, userId: string, walletId: string, chain: string, token: string, p: any) {
+  const dup = q1(db, `SELECT id FROM strategies WHERE user_id = ? AND wallet_id = ? AND chain = ? AND token = ? AND kind = 'position_exit' AND lifecycle IN ('active','paused','draft')`, userId, walletId, chain, token);
+  if (dup) throw new ApiError('VERSION_CONFLICT', 'This coin already has an exit plan in this wallet — edit that plan instead (two plans would both sell the same tokens).', 409, false, { code: 'EXIT_PLAN_EXISTS', strategyId: dup.id });
   const cfg = D.normalizeExitConfig(p.exit);
   const issues = D.validateExitConfig(cfg);
   if (issues.length) throw new ApiError('VALIDATION_FAILED', issues.map(i => i.message).join('; '), 400, false, { issues });
@@ -61,15 +63,23 @@ export function initialExitState(db: DB, userId: string, walletId: string, chain
 }
 
 // ---------------- Evaluation ----------------
+/** Optimistic write: only if nobody (owner edit, pause, cancel, kill switch) changed the plan since this evaluation read it. */
+class WriteConflict extends Error {}
+function saveStrategy(db: DB, s: any, st: D.ExitState, lifecycle: string, reason: string | null, now: number) {
+  const n = Number(run(db, `UPDATE strategies SET state = ?, lifecycle = ?, reason = COALESCE(?, reason), version = version + 1, updated_at = ? WHERE id = ? AND version = ?`, JSON.stringify(st), lifecycle, reason, now, s.id, s.version).changes);
+  if (n !== 1) throw new WriteConflict('STRATEGY_CHANGED_DURING_EVALUATION');
+  s.version += 1; outbox(db, s.user_id, `strategies:${s.user_id}`, { id: s.id, lifecycle });
+}
 type Row = any;
 const symOf = (db: DB, s: Row): string => findFixtureToken(s.chain, s.token)?.symbol ?? q1(db, `SELECT symbol FROM live_tokens WHERE mint = ?`, s.token)?.symbol ?? String(s.token).slice(0, 6);
 const log = (db: DB, s: Row, events: D.ExitEvent[], now: number, extra: Record<string, unknown> = {}) => { for (const e of events) strategyEvent(db, s.id, `exit.${e.kind}`, { ...e.detail, ...extra }, null, now); };
 
 function observe(db: DB, s: Row, st: D.ExitState, now: number): D.Observation {
   const obs: PriceObs = observePrice(s.chain, s.token, now);
-  const pos = positionOf(db, s.user_id, s.wallet_id, s.chain, s.token);
+  const bal = q1(db, `SELECT qty, reserved FROM paper_balances WHERE wallet_id = ? AND asset = ?`, s.wallet_id, s.token);
+  const held = bal ? D.str(D.max('0', bal.qty)) : '0'; const available = bal ? D.str(D.max('0', D.sub(bal.qty, bal.reserved))) : '0';
   const dust = obs.usd && D.gt(obs.usd, '0') ? D.str(D.rescale(D.div(DUST_USD, obs.usd, 18), st.decimals, 'ceil')) : undefined;
-  return { now, price: obs.usd, priceAt: obs.at, staleReason: obs.staleReason, heldQty: D.str(D.max('0', pos.available)), staleAfterMs: EXIT_STALE_MS, dustQty: dust };
+  return { now, price: obs.usd, priceAt: obs.at, staleReason: obs.staleReason, heldQty: held, availableQty: available, staleAfterMs: EXIT_STALE_MS, dustQty: dust };
 }
 
 const TERMINAL_FAIL = new Set(['failed', 'expired', 'cancelled']);
@@ -95,7 +105,8 @@ function resolvePending(db: DB, s: Row, st: D.ExitState, now: number, fresh: boo
     const i = q1(db, `SELECT order_id, state FROM trade_intents WHERE id = ?`, intent.id);
     if (i?.order_id) { run(db, `UPDATE exit_orders SET intent_id = ?, order_id = ?, state = 'submitted', updated_at = ? WHERE id = ?`, intent.id, i.order_id, now, p.id); strategyEvent(db, s.id, 'exit.recovered_order', { id: p.id, orderId: i.order_id }, null, now);
       return orderOutcome(q1(db, `SELECT state, amount_in, error FROM orders WHERE id = ?`, i.order_id), p.id); }
-    try { // intent exists but never executed: execute under the same idempotent key, or learn it can no longer be sent
+    try { // intent exists but never executed: approve under the stored grant if the crash came before approval, then execute idempotently
+      if (i?.state === 'awaiting_approval') { const pol = getRiskPolicy(db, s.user_id); approveIntent(db, s.user_id, intent.id, { maxSlippageBps: pol.policy.maxSlippageBps || 1500 }, now, `strategy:${s.id}`); strategyEvent(db, s.id, 'exit.recovered_approval', { id: p.id, intentId: intent.id }, null, now); }
       const o = executeIntent(db, s.user_id, intent.id, now, `${p.id}:exec`, fault ?? 'none', `strategy:${s.id}`);
       run(db, `UPDATE exit_orders SET intent_id = ?, order_id = ?, state = 'submitted', updated_at = ? WHERE id = ?`, intent.id, o.id, now, p.id);
       return orderOutcome(q1(db, `SELECT state, amount_in, error FROM orders WHERE id = ?`, o.id), p.id);
@@ -131,6 +142,14 @@ function settle(db: DB, s: Row, st: D.ExitState, r: D.OrderResult, now: number):
 }
 
 export function evalPositionExit(db: DB, s: Row, now: number, fault?: any): string {
+  try { return evalPositionExitInner(db, s, now, fault); }
+  catch (e) {
+    if (!(e instanceof WriteConflict)) throw e;
+    strategyEvent(db, s.id, 'exit.write_conflict', { note: 'Plan changed while evaluating (owner edit / pause / cancel). Nothing was sent after the change; it is re-evaluated from the saved state next tick.' }, null, now);
+    return 'conflict_retry';
+  }
+}
+function evalPositionExitInner(db: DB, s: Row, now: number, fault?: any): string {
   let st: D.ExitState = JSON.parse(s.state);
   if (st.status === 'closed') { saveStrategy(db, s, st, 'completed', st.closeReason, now); return 'closed'; }
   if (st.pending) {

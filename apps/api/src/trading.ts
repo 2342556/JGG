@@ -364,6 +364,24 @@ export function reconcileOrder(db: DB, userId: string, orderId: string, now: num
   });
 }
 
+/**
+ * Paper only: an order left in 'submitting' means the process stopped between persisting the order and recording the
+ * simulator's outcome. The simulator is in-process, so nothing executed: expire it (via reconciliation_required) and release
+ * its reservation, so the strategy that owns it can decide again. Live orders are never touched here (the chain is the truth).
+ */
+export function expireInterruptedPaperOrders(db: DB, now: number, olderThanMs = 30_000) {
+  const rows = qa(db, `SELECT id, user_id, intent_id FROM orders WHERE mode != 'live' AND state = 'submitting' AND updated_at < ? LIMIT 100`, now - olderThanMs);
+  for (const o of rows) tx(db, () => {
+    orderTransition(db, o.id, 'reconciliation_required', { reason: 'PAPER_DISPATCH_INTERRUPTED' }, now);
+    orderTransition(db, o.id, 'expired', { reason: 'PAPER_DISPATCH_INTERRUPTED', note: 'In-process simulator never produced an outcome; nothing executed.' }, now);
+    const i = q1(db, `SELECT * FROM trade_intents WHERE id = ?`, o.intent_id);
+    if (i?.reservation_id) releaseReservation(db, i.reservation_id);
+    if (i && i.state === 'executing') transitionIntent(db, i.id, 'completed', 'ORDER_EXPIRED', now);
+    audit(db, o.user_id, 'reconciler', 'order.interrupted_paper_expired', { orderId: o.id });
+  });
+  return rows.length;
+}
+
 export function cancelOrder(db: DB, userId: string, orderId: string, now: number) {
   return tx(db, () => {
     const o = q1(db, `SELECT * FROM orders WHERE id = ? AND user_id = ?`, orderId, userId);

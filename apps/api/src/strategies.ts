@@ -115,7 +115,8 @@ export function createStrategy(db: DB, userId: string, body: { kind: string; cha
   if (tokenKinds.includes(body.kind)) {
     if (!token) throw new ApiError('VALIDATION_FAILED', 'tokenAddress is required', 400);
     const src = getMarketSource(); const live = !!src && src.kind !== 'fixture';
-    const known = live ? src!.priceUsd(body.chain, token, now) !== null : !!findFixtureToken(body.chain, token);
+    // Exits may be attached to an indexed coin even when it has graduated (its price then comes from Jupiter, fetched once a plan exists).
+    const known = live ? (src!.priceUsd(body.chain, token, now) !== null || (body.kind === 'position_exit' && !!q1(db, `SELECT 1 FROM live_tokens WHERE mint = ?`, token))) : !!findFixtureToken(body.chain, token);
     if (!known && body.kind !== 'token_snipe') throw new ApiError('NOT_FOUND', live ? 'Coin not indexed, graduated, or unpriced on live data' : 'Token not found on this chain', 404);
   }
   let state: any;
@@ -346,7 +347,7 @@ export function evaluateOne(db: DB, id: string, now: number, fault?: any): strin
       st.coord = claim.state;
       // Key includes the coordinator version: every claim (attempt) has its own id, so a retry after a definitive failure is a new order.
       const r = submit(db, s, { side: 'sell', amount: claim.qty, key: `stg:${id}:${c.exitId}:v${st.coord.version}`, riskReducing: true }, now, fault);
-      if (!r.ok) { event(db, id, 'exit_failed', r, null, now); notify(db, s.user_id, 'unprotected', 'Exit could not be submitted', `${s.kind} exit ${c.exitId} failed: ${r.message}. Position may be unprotected.`, `exitfail:${id}:${c.exitId}`); save(db, s, st, 'active', r.code, now); return `exit_blocked:${r.code}`; }
+      if (!r.ok) { st.coord = releaseClaim(st.coord, c.exitId); /* never sent: the tokens are still ours to protect */ event(db, id, 'exit_failed', r, null, now); notify(db, s.user_id, 'unprotected', 'Exit could not be submitted', `${s.kind} exit ${c.exitId} failed: ${r.message}. Position may be unprotected.`, `exitfail:${id}:${c.exitId}`); save(db, s, st, 'active', r.code, now); return `exit_blocked:${r.code}`; }
       if (['reconciliation_required', 'submitting', 'submitted'].includes(r.order.state)) { st.pending = { orderId: r.order.id, exitId: c.exitId }; save(db, s, st, 'active', 'PENDING_SETTLEMENT', now); return 'pending'; }
       if (r.order.state !== 'finalized') { // failed/expired: nothing sold — return the claim so the exit is re-evaluated (fix: was marked done)
         st.coord = releaseClaim(st.coord, c.exitId);
@@ -505,7 +506,9 @@ function evalAutoTrader(db: DB, s: any, p: any, st: any, now: number, fault?: an
   if (open >= (p.maxPositions ?? 3)) { save(db, s, st, 'active', null, now); return 'max_positions'; }
   const src = getMarketSource(); const live = src && src.kind !== 'fixture';
   const res = live ? D.runFinder(src!.finderCandidates(s.chain, now), src!.finderConfig, src!.finderExclude) : D.runFinder(finderCandidates(s.chain, now));
-  const pick = res.passed.find(c => c.score >= (p.minScore ?? 50) && !st.bought[c.address]);
+  // Skip coins this wallet already holds or already protects with an exit plan (one plan per coin per wallet).
+  const held = new Set(qa(db, `SELECT token FROM strategies WHERE user_id = ? AND wallet_id = ? AND kind = 'position_exit' AND lifecycle IN ('active','paused','draft')`, s.user_id, s.wallet_id).map(r => r.token as string));
+  const pick = res.passed.find(c => c.score >= (p.minScore ?? 50) && !st.bought[c.address] && !held.has(c.address));
   const decision = { at: new Date(now).toISOString(), scanned: res.scanned, passed: res.passed.length, excluded: res.excluded, pick: pick ? { address: pick.address, symbol: pick.symbol, score: pick.score, reasons: pick.reasons } : null };
   st.decisions = [decision, ...(st.decisions ?? [])].slice(0, 20);
   if (!pick) { save(db, s, st, 'active', null, now); return 'no_candidate'; }

@@ -119,11 +119,13 @@ export type Observation = {
   now: number;
   price: string | null;      // USD per token
   priceAt: number | null;    // when that price was valid
-  heldQty: string;           // reconciled tokens actually held for this position right now
+  heldQty: string;           // tokens actually held right now (balance, including any reserved by other pending orders)
+  availableQty?: string;     // of those, tokens free to sell now (not reserved); defaults to heldQty
   staleAfterMs: number;      // older prices never trigger anything
   dustQty?: string;          // below this quantity a sale is not attempted (would not route / costs more than it returns)
   staleReason?: string | null; // why the source considers the price unusable (logged); forces "stale"
 };
+const FUTURE_TOLERANCE_MS = 2_000;
 export type Step = { state: ExitState; events: ExitEvent[]; order: PendingExit | null };
 
 export function newExitState(config: ExitConfig, entry: string, qty: string, decimals: number): ExitState {
@@ -162,12 +164,13 @@ export function decideExit(prev: ExitState, o: Observation, idPrefix: string): S
   if (isZero(s.managedQty)) { close(s, 'POSITION_GONE', ev); return { state: s, events: ev, order: null }; }
 
   // 2. Only fresh, positive, in-order prices can move a stop or trigger a sale.
-  const fresh = !o.staleReason && o.price !== null && o.priceAt !== null && gt(o.price, '0') && o.now - o.priceAt <= o.staleAfterMs;
+  const future = o.priceAt !== null && o.priceAt > o.now + FUTURE_TOLERANCE_MS; // clock skew: a future-dated price would block every real one after it
+  const fresh = !o.staleReason && !future && o.price !== null && o.priceAt !== null && gt(o.price, '0') && o.now - o.priceAt <= o.staleAfterMs;
   if (!fresh) {
-    if (s.staleSince === null) { s.staleSince = o.now; ev.push({ kind: 'price_stale', detail: { reason: o.staleReason ?? (o.price === null ? 'NO_PRICE' : 'TOO_OLD'), price: o.price, priceAt: o.priceAt, now: o.now, maxAgeMs: o.staleAfterMs } }); }
+    if (s.staleSince === null) { s.staleSince = o.now; ev.push({ kind: 'price_stale', detail: { reason: o.staleReason ?? (future ? 'PRICE_FROM_FUTURE' : o.price === null ? 'NO_PRICE' : 'TOO_OLD'), price: o.price, priceAt: o.priceAt, now: o.now, maxAgeMs: o.staleAfterMs } }); }
     return { state: s, events: ev, order: null };
   }
-  if (s.lastPrice && o.priceAt! < s.lastPrice.at) return { state: s, events: ev, order: null }; // older than what we already used
+  if (s.lastPrice && o.priceAt! < s.lastPrice.at) { ev.push({ kind: 'price_out_of_order', detail: { priceAt: o.priceAt, lastAt: s.lastPrice.at } }); return { state: s, events: ev, order: null }; } // older than what we already used
   if (s.staleSince !== null) { ev.push({ kind: 'price_fresh', detail: { price: o.price, staleForMs: o.now - s.staleSince } }); s.staleSince = null; }
   const price = o.price!; s.lastPrice = { usd: price, at: o.priceAt! };
   const c = s.config;
@@ -175,9 +178,10 @@ export function decideExit(prev: ExitState, o: Observation, idPrefix: string): S
   // 3. Trailing: activation, then peak only rises, so the trigger only rises.
   if (s.trailing.status === 'waiting') {
     const start = c.trailing.activation === 'immediate' || (c.trailing.activation === 'at_gain' && gte(price, takeProfitPrice(s.entry, c.trailing.activationGainPct!)));
-    if (start) { s.trailing = { status: 'active', peak: null, trigger: null, activatedAt: o.now }; ev.push({ kind: 'trailing_activated', detail: { mode: c.trailing.activation, price } }); }
+    if (start) { s.trailing = { status: 'active', peak: null, trigger: null, activatedAt: o.priceAt! }; ev.push({ kind: 'trailing_activated', detail: { mode: c.trailing.activation, price } }); }
   }
-  if (s.trailing.status === 'active' && (s.trailing.peak === null || gt(price, s.trailing.peak))) {
+  // Only prices observed at/after activation count toward the peak (spec: "highest price observed after activation").
+  if (s.trailing.status === 'active' && o.priceAt! >= (s.trailing.activatedAt ?? 0) && (s.trailing.peak === null || gt(price, s.trailing.peak))) {
     const first = s.trailing.peak === null; s.trailing.peak = price;
     const t = trailingTrigger(price, c.trailing.pct); // monotonic even after an owner override kept a higher trigger
     s.trailing.trigger = s.trailing.trigger && gt(s.trailing.trigger, t) ? s.trailing.trigger : t;
@@ -203,10 +207,21 @@ export function decideExit(prev: ExitState, o: Observation, idPrefix: string): S
     const trig = takeProfitPrice(s.entry, c.partialTp.triggerPct);
     if (!gt(qty, '0') || (o.dustQty && lt(qty, o.dustQty))) {
       s.partial = 'skipped'; ev.push({ kind: 'partial_skipped', detail: { reason: 'BELOW_MINIMUM_SIZE', qty, dustQty: o.dustQty ?? '0' } });
-      if (s.trailing.status === 'waiting' && c.trailing.activation === 'after_partial') { s.trailing = { status: 'active', peak: price, trigger: trailingTrigger(price, c.trailing.pct), activatedAt: o.now }; ev.push({ kind: 'trailing_activated', detail: { mode: 'after_partial', reason: 'PARTIAL_SKIPPED', price, trigger: s.trailing.trigger } }); }
+      if (s.trailing.status === 'waiting' && c.trailing.activation === 'after_partial') { s.trailing = { status: 'active', peak: price, trigger: trailingTrigger(price, c.trailing.pct), activatedAt: o.priceAt! }; ev.push({ kind: 'trailing_activated', detail: { mode: 'after_partial', reason: 'PARTIAL_SKIPPED', price, trigger: s.trailing.trigger } }); }
     } else { plan = { rule: 'partial_tp', qty, trigger: trig }; ev.push({ kind: 'partial_triggered', detail: { price, trigger: trig, heldQty: s.managedQty, sellPct: c.partialTp.sellPct, qty } }); }
   }
   if (!plan) return { state: s, events: ev, order: null };
+  // Tokens reserved by another pending order (e.g. an unapproved manual sell) are held but not sellable right now.
+  const avail = floorQty(max('0', o.availableQty ?? o.heldQty), s.decimals);
+  if (lt(avail, plan.qty)) {
+    if (plan.rule === 'partial_tp' || !gt(avail, '0') || (o.dustQty && lt(avail, o.dustQty))) {
+      if (plan.rule === 'partial_tp') s.partial = 'armed';
+      ev.push({ kind: 'waiting_reserved', detail: { rule: plan.rule, needed: plan.qty, available: avail, note: 'Tokens are reserved by another pending order; waiting instead of selling less (partial) or nothing (stop).' } });
+      return { state: s, events: ev, order: null };
+    }
+    ev.push({ kind: 'sell_limited_to_available', detail: { rule: plan.rule, needed: plan.qty, available: avail } });
+    plan = { ...plan, qty: avail };
+  }
   if (plan.rule !== 'partial_tp' && (!gt(plan.qty, '0') || (o.dustQty && lt(plan.qty, o.dustQty)))) { ev.push({ kind: 'dust_remainder', detail: { qty: plan.qty, dustQty: o.dustQty ?? '0' } }); close(s, 'DUST_REMAINDER', ev); return { state: s, events: ev, order: null }; }
   s.seq += 1;
   const order: PendingExit = { id: `${idPrefix}:${RULE_TAG[plan.rule]}:${s.seq}`, rule: plan.rule, qty: plan.qty, triggerPrice: plan.trigger, observedPrice: price, plannedAt: o.now };

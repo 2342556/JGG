@@ -151,7 +151,7 @@ export function livePriceObs(db: DB, chain: Chain, token: string, now: number): 
     const x = q1(db, `SELECT usd, source, at FROM ext_prices WHERE chain = 'solana' AND mint = ?`, token);
     if (!x) return none('GRADUATED_NO_EXTERNAL_PRICE', null, null, 'jupiter-price-v3');
     if (now - x.at > EXIT_PRICE_LIMITS.extPriceMs) return none('EXTERNAL_PRICE_STALE', x.usd, x.at, x.source);
-    return { usd: x.usd, at: x.at, source: x.source, staleReason: null };
+    return { usd: x.usd, at: Math.min(x.at, now), source: x.source, staleReason: null }; // clamp: a skewed future timestamp must not outrank real prices
   }
   const p = priceSolDec(t); if (!p) return none('NO_RESERVES');
   if (!u) return none('SOL_USD_UNAVAILABLE');

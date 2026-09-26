@@ -96,6 +96,9 @@ CREATE UNIQUE INDEX ux_exit_one_open ON exit_orders(strategy_id) WHERE state IN 
 CREATE INDEX ix_exit_orders_strategy ON exit_orders(strategy_id, planned_at);
 CREATE TABLE ext_prices (chain TEXT NOT NULL, mint TEXT NOT NULL, usd TEXT NOT NULL, source TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (chain, mint));
 ALTER TABLE fills ADD COLUMN unit_usd TEXT;
+` },
+{ id: '0007_one_exit_plan_per_coin', sql: `
+CREATE UNIQUE INDEX ux_one_exit_plan ON strategies(user_id, wallet_id, chain, token) WHERE kind = 'position_exit' AND lifecycle IN ('active','paused','draft');
 ` }];
 
 export function openDb(path: string): DB {

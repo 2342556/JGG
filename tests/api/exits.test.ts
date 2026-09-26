@@ -206,3 +206,91 @@ test('legacy TP/SL regression: a reverted stop-loss is retried, not marked done'
   assert.equal(S.evaluateAll(db, 'w', NOW + 3000).find(r => r.id === s.id)?.outcome, 'exit_sl');
   assert.equal(q1(db, `SELECT qty FROM paper_balances WHERE wallet_id = ? AND asset = ?`, w, tok.address).qty, '0');
 });
+
+// ---------------- Regressions from the independent review (R1–R8): each asserts the FIXED behavior ----------------
+test('R1 fixed: tokens reserved by an unapproved manual sell do not shrink or close the plan; stop waits, then sells', () => {
+  const e = setup(17);
+  const q = T.createQuote(e.db, e.u, { chain: 'solana', tokenAddress: e.tok.address, side: 'sell', amount: '100', slippageBps: 500, walletId: e.w }, e.t);
+  T.createIntent(e.db, e.u, { quoteId: q.id, source: 'manual' }, e.t, 'r1-manual-sell');
+  assert.equal(e.tick('150'), 'waiting'); assert.equal(e.view().state.managedQty, '100'); assert.equal(e.view().lifecycle, 'active');
+  assert.equal(e.tick('50'), 'waiting', 'all 100 reserved: nothing sellable, the plan waits (it does not close)');
+  assert.ok(e.events().some(x => x.kind === 'exit.waiting_reserved'));
+  run(e.db, `UPDATE paper_balances SET reserved = '0' WHERE wallet_id = ? AND asset = ?`, e.w, e.tok.address);
+  assert.equal(e.tick('50'), 'exit_stop_loss'); assert.equal(e.held(), '0');
+});
+
+test('R1b: part of the tokens reserved → stop sells what is free now, and the rest once released', () => {
+  const e = setup(18);
+  run(e.db, `UPDATE paper_balances SET reserved = '40' WHERE wallet_id = ? AND asset = ?`, e.w, e.tok.address);
+  assert.equal(e.tick('50'), 'exit_stop_loss'); assert.equal(e.exitOrders()[0].qty, '60'); assert.equal(e.view().lifecycle, 'active', '40 still protected');
+  run(e.db, `UPDATE paper_balances SET reserved = '0' WHERE wallet_id = ? AND asset = ?`, e.w, e.tok.address);
+  assert.equal(e.tick('50'), 'exit_stop_loss'); assert.equal(e.held(), '0'); assert.equal(e.view().lifecycle, 'completed');
+});
+
+test('R2 fixed: a second exit plan for the same coin in the same wallet is refused (code and DB)', () => {
+  const e = setup(19);
+  assert.throws(() => S.createStrategy(e.db, e.u, { kind: 'position_exit', chain: 'solana', tokenAddress: e.tok.address, walletId: e.w, params: { exit: CFG, entryUsd: '100', qty: '100' } }, NOW), /already has an exit plan/);
+  assert.throws(() => run(e.db, `INSERT INTO strategies (id, user_id, mode, kind, chain, token, wallet_id, params, state, lifecycle, created_at, updated_at) VALUES ('dup', ?, 'paper', 'position_exit', 'solana', ?, ?, '{}', '{}', 'active', 1, 1)`, e.u, e.tok.address, e.w), /UNIQUE/);
+});
+
+test('R3 fixed: legacy TP/SL stop that could not be sent keeps protecting and sells when allowed again', () => {
+  const e = setup(20, '100'); S.setStrategyLifecycle(e.db, e.u, e.s.id, 'cancel', e.t); // use only the legacy plan here
+  const s = S.createStrategy(e.db, e.u, { kind: 'tp_sl', chain: 'solana', tokenAddress: e.tok.address, walletId: e.w, params: { stopLoss: '0.2', entryUsd: '100', qty: '100' } }, NOW);
+  S._testing.setPriceOverride(() => '70');
+  S.setRiskPolicy(e.db, e.u, { allowedChains: [] }, undefined);
+  const out1 = S.evaluateAll(e.db, 'w', e.t + 1000).find(r => r.id === s.id)?.outcome;
+  assert.match(out1!, /exit_blocked/); assert.equal(e.held(), '100');
+  S.setRiskPolicy(e.db, e.u, { allowedChains: ['solana'] }, undefined);
+  assert.equal(S.evaluateAll(e.db, 'w', e.t + 3000).find(r => r.id === s.id)?.outcome, 'exit_sl'); assert.equal(e.held(), '0');
+});
+
+test('R4 fixed: an owner edit made during an evaluation is never overwritten by the worker', () => {
+  const e = setup(21);
+  const row = q1(e.db, `SELECT * FROM strategies WHERE id = ?`, e.s.id);
+  X.overrideExit(e.db, e.u, e.s.id, { config: { ...CFG, stopLoss: { enabled: true, pct: '5' } }, version: e.view().version }, NOW);
+  assert.equal(X.evalPositionExit(e.db, row, NOW + 1000), 'conflict_retry');
+  assert.equal(e.view().state.config.stopLoss.pct, '5'); assert.equal(e.view().exit!.levels.stopLoss, '95');
+  assert.equal(e.tick('94'), 'exit_stop_loss', 'the owner\'s tighter stop is what fires');
+  // a cancel during evaluation is not undone either
+  const f = setup(22); const row2 = q1(f.db, `SELECT * FROM strategies WHERE id = ?`, f.s.id); S.setStrategyLifecycle(f.db, f.u, f.s.id, 'cancel', f.t);
+  assert.equal(X.evalPositionExit(f.db, row2, NOW + 1000), 'conflict_retry'); assert.equal(f.view().lifecycle, 'cancelled');
+});
+
+test('R5 fixed: a paper order orphaned mid-dispatch is expired by the worker; the exit then retries and sells once', () => {
+  const e = setup(23);
+  X._testHooks.crash = 'after_submit'; try { e.tick('70'); } finally { X._testHooks.crash = null; }
+  const o = q1(e.db, `SELECT id FROM orders WHERE strategy_id = ?`, e.s.id);
+  run(e.db, `UPDATE orders SET state = 'submitting' WHERE id = ?`, o.id); run(e.db, `UPDATE paper_balances SET qty = '100' WHERE wallet_id = ? AND asset = ?`, e.w, e.tok.address); // emulate: died before the outcome
+  assert.equal(e.tick('10'), 'awaiting_settlement');
+  assert.equal(T.expireInterruptedPaperOrders(e.db, e.t + 60_000), 1);
+  assert.match(e.tick('10', { dt: 61_000 })!, /waiting|exit_failed/);
+  assert.equal(e.tick('10', { dt: 5_000 }), 'exit_stop_loss'); assert.equal(e.held(), '0');
+  assert.equal(e.sells().filter(x => x.state === 'finalized').length, 1, 'exactly one real sale');
+});
+
+test('R6 fixed: a price observed before trailing activation never sets the peak', () => {
+  let st = D.newExitState(CFG, '100', '100', 6);
+  let step = D.decideExit(st, { now: 10_000, price: '200', priceAt: 10_000, heldQty: '100', staleAfterMs: 30_000 }, 'x');
+  st = D.applyOrderResult(step.state, { id: step.order!.id, outcome: 'filled', soldQty: '50' }, 40_000).state;
+  step = D.decideExit(st, { now: 41_000, price: '300', priceAt: 15_000, heldQty: '50', staleAfterMs: 30_000 }, 'x');
+  assert.equal(step.state.trailing.peak, null, 'pre-activation spike ignored');
+  step = D.decideExit(step.state, { now: 42_000, price: '210', priceAt: 42_000, heldQty: '50', staleAfterMs: 30_000 }, 'x');
+  assert.equal(step.state.trailing.peak, '210'); assert.equal(step.state.trailing.trigger, '168');
+});
+
+test('R7 fixed: crash after the sell intent was created but before approval → recovery approves and sells once', () => {
+  const e = setup(24);
+  X._testHooks.crash = 'after_plan'; try { e.tick('70'); } finally { X._testHooks.crash = null; }
+  const eo = q1(e.db, `SELECT id, qty FROM exit_orders WHERE strategy_id = ?`, e.s.id);
+  const q = T.createQuote(e.db, e.u, { chain: 'solana', tokenAddress: e.tok.address, side: 'sell', amount: eo.qty, slippageBps: 500, walletId: e.w }, e.t + 1000);
+  T.createIntent(e.db, e.u, { quoteId: q.id, source: 'strategy', strategyId: e.s.id }, e.t + 1000, `${eo.id}:intent`); // what submit() did before dying
+  assert.match(e.tick('70')!, /closed:STOP_LOSS|exit_stop_loss/);
+  assert.ok(e.events().some(x => x.kind === 'exit.recovered_approval')); assert.equal(e.held(), '0'); assert.equal(e.sells().length, 1);
+});
+
+test('R8 fixed: a future-dated price is treated as stale and cannot block later real prices', () => {
+  const e = setup(25);
+  assert.equal(e.tick({ usd: '150', at: NOW + 3_600_000, source: 'skewed', staleReason: null }), 'waiting');
+  assert.equal(e.events().find(x => x.kind === 'exit.price_stale')?.detail.reason, 'PRICE_FROM_FUTURE');
+  assert.equal(e.tick('10'), 'exit_stop_loss', 'the next real price still triggers the stop');
+});

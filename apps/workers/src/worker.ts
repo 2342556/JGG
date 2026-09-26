@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { hostname } from 'node:os';
 import { openDb, qa, run, tx, type DB } from '../../api/src/db.ts';
 import { evaluateAll } from '../../api/src/strategies.ts';
-import { reconcileOrder, releaseReservation } from '../../api/src/trading.ts';
+import { reconcileOrder, releaseReservation, expireInterruptedPaperOrders } from '../../api/src/trading.ts';
 import { evaluateAlerts } from '../../api/src/alerts.ts';
 import { ensureDemoAnchor } from '../../api/src/server.ts';
 import { demoNow } from '../../../packages/test-fixtures/src/index.ts';
@@ -30,6 +30,7 @@ export const RECONCILE_AFTER_MS = 5_000;
 
 export function tickOnce(db: DB, owner: string, now = getMarketSource()?.now() ?? demoNow()) {
   if (getMarketSource()?.kind === 'solana_live') { L.recordFinderPasses(db, now); L.updateFinderOutcomes(db, now); }
+  const interrupted = expireInterruptedPaperOrders(db, now); // paper orders orphaned by a crash mid-dispatch
   const strategies = evaluateAll(db, owner, now);
   // Reconcile uncertain submissions: consult external truth; never resubmit (T20).
   const uncertain = qa(db, `SELECT id, user_id FROM orders WHERE state = 'reconciliation_required' AND updated_at < ? LIMIT 100`, now - RECONCILE_AFTER_MS);
@@ -40,7 +41,7 @@ export function tickOnce(db: DB, owner: string, now = getMarketSource()?.now() ?
   const alerts = evaluateAlerts(db, now);
   run(db, `UPDATE outbox_events SET published_at = ? WHERE published_at IS NULL AND created_at < ?`, Date.now(), Date.now() - 60_000);
   run(db, `DELETE FROM outbox_events WHERE published_at IS NOT NULL AND published_at < ?`, Date.now() - 86_400_000);
-  const summary = { strategies: strategies.length, triggered: strategies.filter(s => !['waiting', 'watching', 'lease_held', 'no_price'].includes(s.outcome)).length, reconciled: reconciled.length, expired: stale.length, alertsFired: alerts.fired };
+  const summary = { strategies: strategies.length, triggered: strategies.filter(s => !['waiting', 'watching', 'lease_held', 'no_price'].includes(s.outcome)).length, reconciled: reconciled.length, interrupted, expired: stale.length, alertsFired: alerts.fired };
   run(db, `INSERT INTO worker_state (key, value, updated_at) VALUES ('heartbeat', ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`, JSON.stringify({ owner, ...summary, demoClock: new Date(now).toISOString() }), Date.now());
   return summary;
 }

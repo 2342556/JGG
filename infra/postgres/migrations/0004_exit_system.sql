@@ -10,6 +10,8 @@ CREATE TABLE exit_orders (id text PRIMARY KEY, user_id text NOT NULL REFERENCES 
 -- The partial take-profit can be FILLED at most once per position; at most one exit order in flight per position.
 CREATE UNIQUE INDEX ux_exit_partial_once ON exit_orders (strategy_id) WHERE rule = 'partial_tp' AND state = 'filled';
 CREATE UNIQUE INDEX ux_exit_one_open ON exit_orders (strategy_id) WHERE state IN ('planned','submitted');
+-- One exit plan per coin per wallet: two plans would both sell the same tokens.
+CREATE UNIQUE INDEX ux_one_exit_plan ON strategies (user_id, wallet_id, chain, token) WHERE kind = 'position_exit' AND lifecycle IN ('active','paused','draft');
 CREATE INDEX ix_exit_orders_strategy ON exit_orders (strategy_id, planned_at);
 -- Per-fill USD unit price, so exits use the actual average FILL price (cost basis also includes network fees).
 ALTER TABLE fills ADD COLUMN unit_usd numeric;
