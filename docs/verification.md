@@ -48,3 +48,9 @@ _Environment: Node v22.22.2 (Linux), no npm registry access, Chromium via Python
 
 ## Not verified
 Live data, live execution, any funded transaction (T59 not authorized), social/news, launches, perps, Up/Down, EVM sign-in, Postgres repository in the Node app, type-check against real @types packages, axe-core audit, multi-node load, real DB restore drill.
+
+## Session 8 — Exit system (paper mode) — 2026-09-26
+- Unit + service tests: **143/143** (`npm test`). Exit-specific: 18 domain (incl. owner's worked example, 300-run random-walk property: never oversells, partial filled at most once, trailing trigger never falls), 32 service-level on real paper quotes → intents → orders → fills (worked example end to end, revert → retry with new id, uncertain → no resubmit → reconcile, crash after write-ahead / after send / before approval, stale & future-dated prices, reserved tokens, kill switch, DB invariants, legacy TP/SL regression, auto trader protectability), 4 on live-shaped pump.fun data.
+- Independent review: round 1 found 8 defects (all reproduced), round 2 found 6 more introduced/exposed by the fixes; all fixed, each with a regression test; the pre-send guard was mutation-tested (test fails without it).
+- Browser: smoke 18 routes × 7 viewports 0 errors / 0 overflow, 6/6 flows; `tests/e2e/exits_mobile.py` (390×844): editor, validation blocks start, estimate preview, auto position with exact levels, per-position override saved, Token-page plan with exact numbers from the real fill; `auto_mobile`, `live_ui` (simulated live indexer), `pwa_a11y` clean.
+- Not verified: anything on mainnet. Live trading remains OFF; no real order was submitted.

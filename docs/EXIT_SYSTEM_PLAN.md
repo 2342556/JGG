@@ -1,6 +1,28 @@
 # Position exit system — inspection findings and plan
 
-_Status: plan, awaiting owner decisions. Paper only. Live trading stays off; no real order is submitted until the owner approves the verified setup._
+_Status: IMPLEMENTED and verified in paper mode (2026-09-26). Live trading stays off; no real order has been submitted. Enabling live requires the owner's explicit approval of the verified setup._
+
+## Owner decisions (2026-09-26)
+- Trigger prices in **USD** (so a fresh SOL/USD rate is required too; a SOL/USD move alone can move a USD trigger).
+- Stop-loss stays active after the partial take-profit; the higher of stop-loss and trailing trigger wins.
+- Graduated coins: Jupiter Price v3 (refreshed every 10 s for coins with a plan).
+- A short fill on the partial take-profit is logged and never topped up.
+
+## Behaviours added beyond the plan (found in review; reported, not silent)
+- Tokens reserved by another pending order are never counted as gone: a stop sells what is free and waits for the rest; the partial waits rather than selling less.
+- One exit-managing plan per coin per wallet (including legacy TP/SL), enforced in code and by a unique index.
+- An uncertain order on another coin no longer freezes this coin's stop-loss (previously all of a user's automation waited).
+- The auto trader does not buy a coin whose exit price is not fresh (it could not be protected).
+- Every exit write is version-checked; a pause/cancel/edit between the write-ahead and sending means the order is not sent.
+- After a reconnect, a coin's curve price counts only once a new trade for it is indexed (stops wait rather than fire on possibly wrong reserves).
+
+## Remaining platform limits (not solvable in code here)
+- No native stop orders: exits are market sells sent when JGG sees the trigger (worker every ~2 s). Fills can be below the trigger in a fast drop; nothing protects the position while the server is down.
+- If a rug drains the bonding curve's SOL, no stop-loss can sell at any price.
+- Peak is sampled at each price check (~2 s); a spike between checks is not counted.
+- A quiet coin after a stream reconnect waits for its next trade before exits resume (reading the curve account directly needs pump.fun's account layout verified first).
+- Jupiter Trigger API V2 (native stop/OCO/trailing) exists but needs $10 minimum, fills partially, moves tokens to a Privy vault, and pump.fun curve support is undocumented — not used.
+- No testnet for pump.fun/Jupiter: verification = paper mode on fixture and live-shaped data.
 
 ## What exists today (inspected)
 
