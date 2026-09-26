@@ -1,6 +1,12 @@
 # JGG — Build State (checkpoint)
 
-_Last updated: 2026-09-26, session 8._
+_Last updated: 2026-09-26, session 9._
+
+## Session 9 (owner: wants to try live trading — asked "ano ang solution" for the 4 disclosed platform limits, then "continue the setup")
+- Inspected: the full live-trading path the owner asked for (custodial wallet, allowlist, VPS env flags, dry run, small caps) was already built in session 6 and is still intact and passing — `apps/api/src/custody.ts` (keygen, AES-256-GCM storage, simulate-before-sign, chain-verified fills, reconciliation, withdraw-to-verified-wallet-only), the gate checklist (`liveGateFor`) and its UI (`apps/web/src/pages/Account.tsx` "Trading wallet" tab — shows each unmet condition by name, e.g. `WALLET_NOT_ALLOWLISTED`, `NO_TRADING_WALLET`, with a Create button once the server side is configured), and `docs/DEPLOY.md §3` (the exact command sequence). `tests/api/custody.test.ts` (5 tests: gate, buy end-to-end, safety caps stop before signing, reconciliation resend, withdraw) — part of the 143/143 that still pass.
+- Nothing new needed in code for steps 1–4 of the owner's list; confirmed by reading the code and re-running the suite (143/143), not assumed.
+- What is NOT done, and can't be done from this container: the owner's own VPS deploy, his own env vars/master key, and the first real 0.01 SOL mainnet dry run — those need his server access and his funds, and live stays off (`JGG_LIVE_TRADING` unset) until he explicitly does them and reports back.
+- Answered (not yet actioned): the 4 disclosed platform limits are real and were explained per-item — 2 are irreducible (no native stop order on Solana swaps → market-sell-on-detection is the only mechanism; a fully-drained curve has no price to sell at), 1 is a previously-made owner choice open to revisit (USD-denominated triggers vs. an optional SOL-denominated toggle — not built, would be a follow-up if wanted), 1 already has its mitigation path (mainnet dry run per DEPLOY.md §3, since no testnet exists for pump.fun/Jupiter).
 
 ## Status in one line
 Demo/Paper terminal works end-to-end (web + API + worker + Postgres/RLS schema verified on Supabase). Nothing is live. See `docs/REQUIREMENTS.md` for every M/C/T item.
