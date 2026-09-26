@@ -117,7 +117,7 @@ Handlers: `apps/api/src/tools.ts` (shared by Skills Market, AI planner and API k
 | T07 | implemented_demo | State/ErrorState/StaleBanner components; provider-unavailable & signed-out states |
 | T08 | implemented_demo | canvas candles with explicit gaps; USD; pool shown |
 | T09 | implemented_demo | tests/e2e/pwa_a11y.py: every visible control has an accessible name on 14 routes, h1 + main landmark, visible focus, "/" search; token contrast ≥5:1 (muted 5.6–6.3, neg 5.1–5.7); drawer focus trap + Esc; axe-core not run (not installable offline) |
-| T10 | implemented_demo | fixture copycat JGGDEMO; search warns; C03 refuses ambiguous names |
+| T10 | implemented_demo | fixture copycat DEMO; search warns; C03 refuses ambiguous names |
 | T11 | implemented_demo | tests/domain invariants |
 | T12 | implemented_demo | tests/domain fixtures A01–A07 |
 | T13 | implemented_demo | tests/domain unknown basis |

@@ -33,7 +33,7 @@ const T = [
   ['T04', 'implemented_demo', E2E], ['T05', 'implemented_demo', 'dock resize/collapse/split persisted per user + device class on the server (settings.layout) and locally; keyboard separators; tests/e2e/pwa_a11y.py layout_persisted'],
   ['T06', 'implemented_demo', 'useFrozen: order held under pointer/focus; click binds to address'], ['T07', 'implemented_demo', 'State/ErrorState/StaleBanner components; provider-unavailable & signed-out states'],
   ['T08', 'implemented_demo', 'canvas candles with explicit gaps; USD; pool shown'], ['T09', 'implemented_demo', 'tests/e2e/pwa_a11y.py: every visible control has an accessible name on 14 routes, h1 + main landmark, visible focus, "/" search; token contrast ≥5:1 (muted 5.6–6.3, neg 5.1–5.7); drawer focus trap + Esc; axe-core not run (not installable offline)'],
-  ['T10', 'implemented_demo', 'fixture copycat JGGDEMO; search warns; C03 refuses ambiguous names'], ['T11', 'implemented_demo', 'tests/domain invariants'], ['T12', 'implemented_demo', 'tests/domain fixtures A01–A07'],
+  ['T10', 'implemented_demo', 'fixture copycat DEMO; search warns; C03 refuses ambiguous names'], ['T11', 'implemented_demo', 'tests/domain invariants'], ['T12', 'implemented_demo', 'tests/domain fixtures A01–A07'],
   ['T13', 'implemented_demo', 'tests/domain unknown basis'], ['T14', 'implemented_paper', 'tests/api T14 (service) + Supabase RLS check as non-bypass role jgg_app'],
   ['T15', 'implemented_paper', 'fills UNIQUE(order,chain_fill_id); inbox dedupe; tests/api T31'], ['T16', 'implemented_demo', 'provenance meta on every market response; unknown ≠ 0'],
   ['T17', 'implemented_demo', 'tests/domain candle aggregation'], ['T18', 'implemented_demo', 'tests/domain ranking reproducibility'],

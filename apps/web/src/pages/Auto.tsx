@@ -1,10 +1,16 @@
 import { useState } from 'react';
 import { Link } from '../router.tsx';
 import { api } from '../api.ts';
-import { useApp, useApi, State, ModeBadge, SimTag, I, cls, toast, errMsg, NATIVE, short, price, usd, pct } from '../lib.tsx';
-import { QuickBuy } from '../components/Trade.tsx';
+import { useApp, useApi, State, ModeBadge, SimTag, I, cls, toast, errMsg, NATIVE, short, usd, pct } from '../lib.tsx';
 
-const EXIT_DEFAULT = { partialPct: '50', trailAt: '50', trailDist: '15', tpAt: '100', slPct: '30' };
+type ExitCfg = { partialPct: string; trailAt: string; trailDist: string; tpAt: string; slPct: string };
+type Cfg = { amount: string; maxPos: string; minScore: string; ex: ExitCfg };
+const PRESETS: Record<'Conservative' | 'Balanced' | 'Aggressive', Cfg & { blurb: string }> = {
+  Conservative: { blurb: 'Small size, strict picks', amount: '0.05', maxPos: '2', minScore: '65', ex: { partialPct: '50', trailAt: '50', trailDist: '20', tpAt: '80', slPct: '20' } },
+  Balanced: { blurb: 'The default', amount: '0.1', maxPos: '3', minScore: '50', ex: { partialPct: '50', trailAt: '50', trailDist: '15', tpAt: '100', slPct: '30' } },
+  Aggressive: { blurb: 'Bigger size, more picks', amount: '0.2', maxPos: '5', minScore: '35', ex: { partialPct: '40', trailAt: '40', trailDist: '25', tpAt: '150', slPct: '35' } },
+};
+type PresetName = keyof typeof PRESETS;
 
 export function AutoPage() {
   const { me, chain, openAuth } = useApp();
@@ -16,26 +22,25 @@ export function AutoPage() {
   const f = finder.data?.data;
   return <div className="page auto">
     <div className="page-head"><h1>Auto</h1>{me && <ModeBadge mode={me.settings.mode} />}<SimTag /></div>
-    <p className="note warn honest">No strategy can guarantee a 70–90% win rate on meme coins. JGG shows the real win rate it measures — with the number of closed trades. Executions stay paper (virtual) until live trading is authorized.</p>
+    <p className="muted small honest">No bot can promise a win rate. JGG shows what it actually measures. {me?.settings.mode === 'live' ? 'Live mode: trades use real SOL.' : 'Trades are paper (virtual money) until you switch to live.'}</p>
 
     {!me ? <div className="panel pad"><p>Sign in to run the auto trader (Demo/Paper, virtual funds).</p><button className="btn" onClick={openAuth}>Log in</button></div>
       : auto ? <AutoRunning s={auto} children={children} reload={() => strats.reload(true)} />
       : <AutoSetup chain={chain} onStarted={() => strats.reload(true)} />}
 
     <FinderTrackRecord track={track} />
-    <section className="panel" aria-label="Finder">
-      <div className="panel-bar"><strong>Finder</strong><span className="muted small">{f ? `${f.passed.length} of ${f.scanned} passed safety gates · ${f.version}` : ''}</span><div className="grow" /><button className="icon-btn sm" aria-label="Refresh finder" onClick={() => finder.reload()}><I.refresh /></button></div>
-      <State loading={finder.loading} error={finder.error} onRetry={() => finder.reload()} empty={f && !f.passed.length && 'No token passed every safety gate right now. That is a valid answer — no forced trades.'}>
+    <section className="panel" aria-label="Today's picks">
+      <div className="panel-bar"><strong>Today's picks</strong><div className="grow" /><span className="muted small">{f ? `${f.passed.length} of ${f.scanned} passed` : ''}</span></div>
+      <State loading={finder.loading} error={finder.error} onRetry={() => finder.reload()} empty={f && !f.passed.length && 'Nothing passed the safety checks right now — so nothing gets bought. That is on purpose.'}>
         {f && <>
-          <ul className="finder-list">{f.passed.slice(0, 12).map((c: any, i: number) => <li key={c.address}>
+          <ul className="finder-list">{f.passed.slice(0, 10).map((c: any) => <li key={c.address}>
             <Link to={`/token/${chain}/${c.address}`} className="finder-row">
-              <span className="rank">{i + 1}</span>
-              <span className="grow"><strong>{c.symbol}</strong> <span className="mono muted small">{short(c.address, 4)}</span><br /><span className="small muted">{c.reasons.join(' · ') || 'passed gates'}</span></span>
-              <span className="score" title={`Score ${c.score}/100, data coverage ${c.coverageBps / 100}% — a ranking, not a probability`}><b>{c.score}</b><i style={{ width: `${c.score}%` }} /></span>
-              <QuickBuy chain={chain} address={c.address} symbol={c.symbol} amount={chain === 'solana' ? '0.1' : '0.01'} />
+              <span className="grow"><strong>{c.symbol}</strong><br /><span className="small muted">{c.reasons[0] ?? 'Passed all safety checks'}</span></span>
+              <span className="score" title={`Quality score ${c.score}/100 — a ranking, not a probability`}><b>{c.score}</b><i style={{ width: `${c.score}%` }} /></span>
             </Link></li>)}</ul>
-          <details className="pad small"><summary>Why others were excluded</summary><ul>{Object.entries(f.excluded).sort((a: any, b: any) => b[1] - a[1]).map(([g, n]) => <li key={g}>{g.replace(/_/g, ' ')}: {String(n)}</li>)}</ul>
-            <p className="muted">Gates: honeypot must be verified safe (unknown fails), mint/freeze not risky, liquidity ≥ $8k, top-10 ≤ 30%, dev ≤ 10%, insiders ≤ 15%, bundlers ≤ 25%, age 3 min–24 h, not already +300% in 1 h, no heavy sell pressure, ≥ 70% data coverage.</p></details>
+          <details className="pad small"><summary>What the safety checks are</summary>
+            <p className="muted">A coin is skipped if any check fails or its data is missing: honeypot not verified safe, risky mint/freeze authority, liquidity under $8k, top-10 holders over 30%, dev over 10%, insiders over 15%, bundlers over 25%, younger than 3 min or older than 24 h, already up 300% in an hour, or heavy selling.</p>
+            <ul>{Object.entries(f.excluded).sort((a: any, b: any) => b[1] - a[1]).map(([g, n]) => <li key={g}>{g.replace(/_/g, ' ')}: {String(n)}</li>)}</ul></details>
         </>}
       </State>
     </section>
@@ -44,98 +49,109 @@ export function AutoPage() {
 
 function AutoSetup({ chain, onStarted }: { chain: string; onStarted: () => void }) {
   const { me } = useApp();
-  const [amount, setAmount] = useState(chain === 'solana' ? '0.1' : '0.01'); const [maxPos, setMaxPos] = useState('3'); const [minScore, setMinScore] = useState('50');
-  const [ex, setEx] = useState(EXIT_DEFAULT); const [busy, setBusy] = useState(false);
+  const [preset, setPreset] = useState<PresetName | 'Custom'>('Balanced');
+  const [custom, setCustom] = useState<Cfg>(() => { const { blurb: _b, ...c } = PRESETS.Balanced; return { ...c, ex: { ...c.ex } }; });
+  const [busy, setBusy] = useState(false);
   const pol = useApi<any>('/risk-policy', []);
+  const cfg: Cfg = preset === 'Custom' ? custom : PRESETS[preset];
+  const unit = NATIVE[chain]; const live = me?.settings.mode === 'live';
   const num = (v: string) => v.replace(/[^\d.]/g, '');
-  const frac = (pct: string) => String(Number(pct) / 100);
+  const frac = (p: string) => String(Number(p) / 100);
+  const pick = (n: PresetName) => { setPreset(n); const { blurb: _b, ...c } = PRESETS[n]; setCustom({ ...c, ex: { ...c.ex } }); };
+  const edit = (patch: Partial<Cfg> | { ex: Partial<ExitCfg> }) => { setPreset('Custom'); setCustom(c => ({ ...c, ...patch, ex: { ...c.ex, ...((patch as any).ex ?? {}) } })); };
   async function starterPolicy() {
-    try {
-      const a = Number(amount); const m = Number(maxPos);
-      await api('/risk-policy', { method: 'PUT', body: { version: pol.data?.version, policy: { maxPerTrade: amount, maxPerAssetExposure: amount, maxDailyGrossBuy: String(+(a * m * 2).toFixed(6)), maxRealizedDailyLoss: String(+(a * m).toFixed(6)), maxOpenPositions: m, maxSlippageBps: 1500, maxFeeQuote: chain === 'solana' ? '0.01' : '0.005', maxDataAgeMs: 60000, allowedChains: [chain], entriesPaused: false } } });
-      toast('Risk limits saved', 'ok'); pol.reload(true);
-    } catch (e) { toast(errMsg(e), 'err'); }
+    const a = Number(cfg.amount); const m = Number(cfg.maxPos);
+    await api('/risk-policy', { method: 'PUT', body: { version: pol.data?.version, policy: { maxPerTrade: cfg.amount, maxPerAssetExposure: cfg.amount, maxDailyGrossBuy: String(+(a * m * 2).toFixed(6)), maxRealizedDailyLoss: String(+(a * m).toFixed(6)), maxOpenPositions: m, maxSlippageBps: 1500, maxFeeQuote: chain === 'solana' ? '0.01' : '0.005', maxDataAgeMs: 60000, allowedChains: [chain], entriesPaused: false } } });
+    pol.reload(true);
   }
   async function start() {
     setBusy(true);
     try {
-      const live = me?.settings.mode === 'live'; const w = (await api<any[]>('/wallets')).find(x => x.chain === chain && x.custody === (live ? 'hosted' : 'paper'));
+      const w = (await api<any[]>('/wallets')).find(x => x.chain === chain && x.custody === (live ? 'hosted' : 'paper'));
       if (!w) throw new Error(live ? 'Create your trading wallet first (Settings → Trading wallet)' : 'No paper wallet');
-      if (live && !confirm(`Start the auto trader with REAL SOL? Up to ${amount} SOL per trade, ${maxPos} positions, within the server caps.`)) { setBusy(false); return; }
-      const s = await api('/strategies', { method: 'POST', body: { kind: 'auto_trader', chain, walletId: w.id, params: { amount, maxPositions: Number(maxPos), minScore: Number(minScore), scanEverySec: 30,
+      if (live && !confirm(`Start with REAL ${unit}? Up to ${cfg.amount} ${unit} per coin, ${cfg.maxPos} coins at a time.`)) return;
+      if (pol.data && !pol.data.configured) await starterPolicy(); // safe starter limits sized to this plan (daily loss cap = amount × coins)
+      const ex = cfg.ex;
+      const s = await api('/strategies', { method: 'POST', body: { kind: 'auto_trader', chain, walletId: w.id, params: { amount: cfg.amount, maxPositions: Number(cfg.maxPos), minScore: Number(cfg.minScore), scanEverySec: 30,
         partialBps: Math.round(Number(ex.partialPct) * 100), trailActivation: frac(ex.trailAt), retracement: frac(ex.trailDist), tpGain: frac(ex.tpAt), stopLoss: frac(ex.slPct) } } });
       await api(`/strategies/${s.id}/activate`, { method: 'POST', body: {} });
-      toast('Auto trader started (paper).', 'ok'); onStarted();
+      toast(live ? 'Auto trader started (live).' : 'Auto trader started (paper).', 'ok'); onStarted();
     } catch (e) { toast(errMsg(e), 'err'); } finally { setBusy(false); }
   }
   const inp = (label: string, v: string, set: (x: string) => void, suffix: string) => <label className="field"><span>{label}</span><span className="suffix"><input inputMode="decimal" value={v} onChange={e => set(num(e.target.value))} /><em>{suffix}</em></span></label>;
+  const ex = cfg.ex;
   return <section className="panel pad auto-setup" aria-label="Auto trader setup">
-    <h2>Auto trader</h2>
-    <p className="muted small">Scans with the Finder every 30 s, buys at most one new candidate per scan, never buys the same token twice, then manages exits automatically.</p>
-    <div className="grid2">
-      {inp('Amount per trade', amount, setAmount, NATIVE[chain])}{inp('Max open positions', maxPos, setMaxPos, '')}{inp('Min finder score', minScore, setMinScore, '/100')}
+    <h2>Pick a style</h2>
+    <div className="preset-row" role="radiogroup" aria-label="Style">
+      {(Object.keys(PRESETS) as PresetName[]).map(n => <button key={n} role="radio" aria-checked={preset === n} className={cls('preset-card', preset === n && 'on')} onClick={() => pick(n)}>
+        <b>{n}</b><span>{PRESETS[n].amount} {unit} · {PRESETS[n].maxPos} coins</span><small>{PRESETS[n].blurb}</small></button>)}
     </div>
-    <h3>Exit plan</h3>
-    <ol className="plan">
-      <li>At <b>+{ex.trailAt}%</b>: sell <b>{ex.partialPct}%</b> and arm a trailing stop on the rest</li>
-      <li>Trailing stop: sell the rest if price falls <b>{ex.trailDist}%</b> from its peak</li>
-      <li>At <b>+{ex.tpAt}%</b>: take profit on everything left</li>
-      <li>Stop-loss: sell all at <b>−{ex.slPct}%</b></li>
-    </ol>
-    <details><summary>Adjust exit plan</summary><div className="grid2">
-      {inp('Partial sell', ex.partialPct, v => setEx({ ...ex, partialPct: v }), '%')}{inp('Partial + trail start', ex.trailAt, v => setEx({ ...ex, trailAt: v }), '% gain')}
-      {inp('Trail distance', ex.trailDist, v => setEx({ ...ex, trailDist: v }), '%')}{inp('Take profit', ex.tpAt, v => setEx({ ...ex, tpAt: v }), '% gain')}{inp('Stop-loss', ex.slPct, v => setEx({ ...ex, slPct: v }), '% loss')}
-    </div></details>
-    {pol.data && !pol.data.configured ? <div className="note warn"><p>Automation is off by default. Set risk limits first.</p><p className="small">Starter limits: max {amount} {NATIVE[chain]} per trade, {maxPos} open positions, daily buys ≤ {+(Number(amount) * Number(maxPos) * 2).toFixed(4)} {NATIVE[chain]}, stop for the day after {+(Number(amount) * Number(maxPos)).toFixed(4)} {NATIVE[chain]} realized loss.</p><button className="btn" onClick={starterPolicy}>Use these limits</button> <Link className="link" to="/settings?tab=risk">Customize</Link></div>
-      : <button className="btn big buy" disabled={busy || !pol.data} onClick={start}>{busy ? 'Starting…' : me?.settings.mode === 'live' ? 'Start auto trader (LIVE — real SOL)' : 'Start auto trader (paper)'}</button>}
+    <p className="summary-line">Buys up to <b>{cfg.amount} {unit}</b> per coin, <b>{cfg.maxPos}</b> coins at a time. Sells <b>{ex.partialPct}%</b> at <b>+{ex.trailAt}%</b>, then follows the rest up and sells if it drops <b>{ex.trailDist}%</b> from the top. Sells everything at <b>+{ex.tpAt}%</b> or <b>−{ex.slPct}%</b>.</p>
+    <details className="fine-tune"><summary>Fine-tune the numbers{preset === 'Custom' ? ' (custom)' : ''}</summary><div className="grid2">
+      {inp('Amount per coin', cfg.amount, v => edit({ amount: v }), unit)}{inp('Coins at a time', cfg.maxPos, v => edit({ maxPos: v }), '')}{inp('Min quality score', cfg.minScore, v => edit({ minScore: v }), '/100')}
+      {inp('Partial sell', ex.partialPct, v => edit({ ex: { partialPct: v } }), '%')}{inp('Partial sell at', ex.trailAt, v => edit({ ex: { trailAt: v } }), '% gain')}
+      {inp('Trail distance', ex.trailDist, v => edit({ ex: { trailDist: v } }), '%')}{inp('Take profit', ex.tpAt, v => edit({ ex: { tpAt: v } }), '% gain')}{inp('Stop-loss', ex.slPct, v => edit({ ex: { slPct: v } }), '% loss')}
+    </div>
+    </details>
+    {pol.data && !pol.data.configured && <p className="muted small limits-note">Starting also turns on safe daily limits: at most {+(Number(cfg.amount) * Number(cfg.maxPos) * 2).toFixed(4)} {unit} of buys per day, and stops for the day after {+(Number(cfg.amount) * Number(cfg.maxPos)).toFixed(4)} {unit} of losses. <Link className="link" to="/settings?tab=risk">Change limits</Link></p>}
+    <button className="btn big buy" disabled={busy || !pol.data} onClick={start}>{busy ? 'Starting…' : live ? 'Start auto trader — real SOL' : 'Start auto trader'}</button>
   </section>;
+}
+
+function stageOf(c: any): string {
+  const st = c.state ?? {};
+  if (c.lifecycle === 'completed' || Number(st.coord?.remaining ?? 1) === 0) return st.sl?.done ? 'Stopped out' : 'Sold';
+  if (st.trailing?.active && !st.trailing?.fired) return 'Trailing the top';
+  if (st.tp?.some((t: any) => t.done)) return 'Partial profit taken';
+  return 'Holding';
 }
 
 function AutoRunning({ s, children, reload }: { s: any; children: any[]; reload: () => void }) {
   const perf = useApi<any>(`/strategies/${s.id}/performance`, [s.id, children.length], 8000);
   const act = async (a: string) => { try { await api(`/strategies/${s.id}/${a}`, { method: 'POST', body: {} }); reload(); } catch (e) { toast(errMsg(e), 'err'); } };
-  const kill = async () => { try { await api('/automation/stop', { method: 'POST', body: {} }); toast('All automation stopped.', 'warn'); reload(); } catch (e) { toast(errMsg(e), 'err'); } };
-  const p = perf.data; const last = s.state.decisions?.[0];
+  const kill = async () => { if (!confirm('Stop ALL automation now?')) return; try { await api('/automation/stop', { method: 'POST', body: {} }); toast('All automation stopped.', 'warn'); reload(); } catch (e) { toast(errMsg(e), 'err'); } };
+  const p = perf.data; const last = s.state.decisions?.[0]; const on = s.lifecycle === 'active';
   return <section className="panel pad auto-run" aria-label="Auto trader status">
-    <div className="row gap wrap"><h2 className="grow">Auto trader <span className={cls('b', s.lifecycle === 'active' ? 'pos' : 'warn')}>{s.lifecycle}{s.reason ? ` · ${s.reason}` : ''}</span></h2>
-      {s.lifecycle === 'active' ? <button className="btn ghost" onClick={() => act('pause')}>Pause</button> : <button className="btn" onClick={() => act('resume')}>Resume</button>}
-      <button className="btn ghost" onClick={() => act('cancel')}>Stop</button><button className="btn danger" onClick={kill}>Kill switch</button></div>
-    <p className="small muted">{s.params.amount} {NATIVE[s.chain]}/trade · max {s.params.maxPositions ?? 3} positions · min score {s.params.minScore ?? 50} · exits: {(s.params.partialBps ?? 5000) / 100}% at +{Number(s.params.trailActivation ?? 0.5) * 100}% + trail {Number(s.params.retracement ?? 0.15) * 100}%, TP +{Number(s.params.tpGain ?? 1) * 100}%, SL −{Number(s.params.stopLoss ?? 0.3) * 100}%</p>
+    <div className="run-head"><span className={cls('run-dot', on && 'on')} /><div className="grow"><h2>{on ? 'Running' : s.lifecycle === 'paused' ? 'Paused' : s.lifecycle}</h2>
+      <span className="muted small">{s.params.amount} {NATIVE[s.chain]} per coin · up to {s.params.maxPositions ?? 3} coins{s.reason ? ` · ${s.reason}` : ''}</span></div></div>
     <div className="stat-grid compact">
-      <div className="stat"><span>Win rate</span><b>{p?.winRate === null || !p ? '—' : `${p.winRate}%`}</b><small className="muted">{p ? `${p.wins}W / ${p.losses}L of ${p.closedTrades} closed` : ''}</small></div>
-      <div className="stat"><span>Realized</span><b className={!p ? '' : Number(p.realizedUsd) < 0 ? 'neg' : Number(p.realizedUsd) > 0 ? 'pos' : ''}>{p ? usd(p.realizedUsd, 2) : '—'}</b></div>
+      <div className="stat"><span>Win rate</span><b>{!p || p.winRate === null ? '—' : `${p.winRate}%`}</b><small className="muted">{p ? `${p.closedTrades} closed` : ''}</small></div>
+      <div className="stat"><span>Profit</span><b className={!p ? '' : Number(p.realizedUsd) < 0 ? 'neg' : Number(p.realizedUsd) > 0 ? 'pos' : ''}>{p ? usd(p.realizedUsd, 2) : '—'}</b></div>
       <div className="stat"><span>Open</span><b>{p?.openPositions ?? '—'}</b></div>
     </div>
-    {p && <p className="small muted">{p.sampleNote} {p.dataNote}</p>}
-    {last && <p className="small">Last scan {last.at.slice(11, 19)}: {last.pick ? <>picked <Link className="link" to={`/token/${s.chain}/${last.pick.address}`}>{last.pick.symbol}</Link> (score {last.pick.score})</> : 'no candidate passed'} · {last.passed}/{last.scanned} passed gates</p>}
-    <h3>Positions</h3>
-    {!children.length ? <p className="muted small">None yet. The worker scans every 30 s.</p> : <ul className="pos-list">{children.map(c => {
-      const st = c.state; const orig = Number(st.originalQty ?? 0); const rem = Number(st.coord?.remaining ?? 0);
-      return <li key={c.id}><Link to={`/token/${c.chain}/${c.token}`} className="link"><strong>{c.symbol ?? short(c.token)}</strong></Link> <span className={cls('b', c.lifecycle === 'active' ? 'pos' : '')}>{c.lifecycle}</span>
-        <div className="small muted">entry {price(st.entryUsd)} · left {orig ? Math.round(rem * 100 / orig) : 0}% · {st.tp?.map((t: any) => `${t.id} ${t.done ? '✓' : '·'}`).join(' ')} {st.sl?.done ? 'SL ✓' : ''} · trail {st.trailing?.fired ? 'fired' : st.trailing?.active ? `armed, stop ${price(st.stop)}` : 'waiting'}</div>
-        <div className="progress" aria-label={`${Math.round(rem * 100 / (orig || 1))}% of position remaining`}><i style={{ width: `${orig ? (rem * 100 / orig) : 0}%` }} /></div></li>;
-    })}</ul>}
+    {last && <p className="small muted">Last check {last.at.slice(11, 16)} UTC — {last.pick ? <>bought <Link className="link" to={`/token/${s.chain}/${last.pick.address}`}>{last.pick.symbol}</Link></> : 'nothing passed, nothing bought'}.</p>}
+    <ul className="pos-list">{children.map(c => {
+      const st = c.state; const orig = Number(st.originalQty ?? 0); const rem = Number(st.coord?.remaining ?? 0); const left = orig ? Math.round(rem * 100 / orig) : 0;
+      return <li key={c.id}><div className="row gap"><Link to={`/token/${c.chain}/${c.token}`} className="link grow"><strong>{c.symbol ?? short(c.token)}</strong></Link><span className="small muted">{stageOf(c)} · {left}% left</span></div>
+        <div className="progress" aria-label={`${left}% of position remaining`}><i style={{ width: `${left}%` }} /></div></li>;
+    })}</ul>
+    {!children.length && <p className="muted small">No coins yet — it checks every 30 seconds.</p>}
+    <div className="run-actions">{on ? <button className="btn ghost" onClick={() => act('pause')}>Pause</button> : <button className="btn" onClick={() => act('resume')}>Resume</button>}
+      <button className="btn ghost" onClick={() => act('cancel')}>Stop</button><button className="btn danger" onClick={kill}>Stop everything</button></div>
+    {p && <p className="fine muted">{p.sampleNote}</p>}
   </section>;
 }
 
 
 function FinderTrackRecord({ track }: { track: ReturnType<typeof useApi<any>> }) {
-  const d = track.data?.data;
-  return <section className="panel" aria-label="Finder track record">
-    <div className="panel-bar"><strong>Finder track record</strong><span className="muted small">jgg-finder-v1 · measured, not promised</span></div>
-    <State loading={track.loading} error={track.error} onRetry={() => track.reload()} empty={!d && !track.loading && (track.data?.meta?.note ?? 'Not available.')}>
-      {d && <div className="pad">
-        <div className="row gap wrap" style={{ marginBottom: 8 }}>
-          <span className="b">{d.totalTracked} coins tracked</span><span className="b">{d.currentlyTracking} still tracking</span>
-          {Object.entries(d.outcomeCounts).map(([k, v]: any) => <span key={k} className={cls('b', k === 'rugged' ? 'neg' : k === 'graduated' ? 'pos' : '')}>{k.replace(/_/g, ' ')}: {v}</span>)}
-        </div>
-        <div className="table-wrap"><table className="tbl dense"><thead><tr><th>Since scan</th><th className="r">Sample</th><th className="r">Median move</th><th className="r">Avg move</th><th className="r">≥+50%</th><th className="r">≥+100%</th></tr></thead>
-          <tbody>{d.byHorizon.map((h: any) => <tr key={h.minutes}><td>{h.minutes < 60 ? `${h.minutes}m` : h.minutes < 1440 ? `${h.minutes / 60}h` : `${h.minutes / 1440}d`}</td>
-            <td className="r">{h.n || '—'}</td><td className={cls('r', h.medianBps === null ? '' : h.medianBps >= 0 ? 'pos' : 'neg')}>{h.medianBps === null ? '—' : pct(h.medianBps)}</td>
-            <td className={cls('r', h.avgBps === null ? '' : h.avgBps >= 0 ? 'pos' : 'neg')}>{h.avgBps === null ? '—' : pct(h.avgBps)}</td>
-            <td className="r">{h.hit50Rate === null ? '—' : `${h.hit50Rate}%`}</td><td className="r">{h.hit100Rate === null ? '—' : `${h.hit100Rate}%`}</td></tr>)}</tbody></table></div>
-        {d.caveats.map((c: string, i: number) => <p key={i} className="muted small">{c}</p>)}
-      </div>}
+  const d = track.data?.data; const [more, setMore] = useState(false);
+  const withData = (d?.byHorizon ?? []).filter((h: any) => h.n > 0 && h.hit50Rate !== null);
+  const headline = withData[withData.length - 1];
+  const hz = (m: number) => m < 60 ? `${m} min` : m < 1440 ? `${m / 60} h` : `${m / 1440} d`;
+  return <section className="panel pad" aria-label="Track record">
+    <h2 className="h-small">Track record</h2>
+    <State loading={track.loading} error={track.error} onRetry={() => track.reload()} empty={!d && !track.loading && 'The track record starts once JGG runs on live market data. It follows every pick for 24 hours, so give it a few days to collect enough coins.'}>
+      {d && <>
+        {headline ? <p className="headline-stat"><b>{headline.hit50Rate}%</b> of picks were up 50%+ within {hz(headline.minutes)} <span className="muted small">({headline.n} coins)</span></p>
+          : <p className="muted">Still collecting — {d.totalTracked} picks followed so far. Numbers appear once enough time has passed.</p>}
+        <button className="link small" onClick={() => setMore(!more)} aria-expanded={more}>{more ? 'Hide details' : 'Show details by time held'}</button>
+        {more && <div className="table-wrap"><table className="tbl dense"><thead><tr><th>After</th><th className="r">Coins</th><th className="r">Typical move</th><th className="r">Up 50%+</th><th className="r">Up 100%+</th></tr></thead>
+          <tbody>{d.byHorizon.map((h: any) => <tr key={h.minutes}><td>{hz(h.minutes)}</td><td className="r">{h.n || '—'}</td>
+            <td className={cls('r', h.medianBps === null ? '' : h.medianBps >= 0 ? 'pos' : 'neg')}>{h.medianBps === null ? '—' : pct(h.medianBps)}</td>
+            <td className="r">{h.hit50Rate === null ? '—' : `${h.hit50Rate}%`}</td><td className="r">{h.hit100Rate === null ? '—' : `${h.hit100Rate}%`}</td></tr>)}</tbody></table>
+          <p className="muted small">{d.totalTracked} picks followed · {Object.entries(d.outcomeCounts).map(([k, v]: any) => `${k.replace(/_/g, ' ')} ${v}`).join(' · ')}</p>
+          {d.caveats.map((c: string, i: number) => <p key={i} className="muted fine">{c}</p>)}</div>}
+      </>}
     </State>
   </section>;
 }

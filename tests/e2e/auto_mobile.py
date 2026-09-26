@@ -10,9 +10,8 @@ with sync_playwright() as p:
     res['finder_rows_signed_out'] = pg.locator('.finder-row').count()
     pg.get_by_role('button', name='Log In', exact=True).click(); pg.get_by_role('button', name='Continue with a Demo account').click(); pg.wait_for_timeout(900)
     pg.screenshot(path='docs/screenshots/390x844_auto_setup.png', full_page=True)
-    pg.get_by_label('Min finder score').fill('0')  # mechanism test: take the top pick whatever its score (default 50 may rightly buy nothing)
-    pg.get_by_role('button', name='Use these limits').click(); pg.wait_for_timeout(700)
-    pg.get_by_role('button', name='Start auto trader (paper)').click(); pg.wait_for_timeout(6000)  # worker tick = 2 s
+    pg.get_by_text('Fine-tune the numbers').click(); pg.get_by_label('Min quality score').fill('0')  # mechanism test: take the top pick whatever its score (default 50 may rightly buy nothing)
+    pg.get_by_role('button', name='Start auto trader', exact=True).click(); pg.wait_for_timeout(6000)  # worker tick = 2 s
     res['status_text'] = pg.locator('.auto-run h2').inner_text()
     res['positions'] = pg.locator('.pos-list li').count()
     res['win_rate_text'] = pg.locator('.stat-grid.compact .stat').first.inner_text().replace('\n', ' ')

@@ -15,11 +15,15 @@ export function usd(v: string | number | null | undefined, digits = 1): string {
   if (a >= 1e9) return `${s}$${(a / 1e9).toFixed(digits)}B`; if (a >= 1e6) return `${s}$${(a / 1e6).toFixed(digits)}M`; if (a >= 1e3) return `${s}$${(a / 1e3).toFixed(digits)}K`;
   return `${s}$${a.toFixed(a < 10 ? 2 : 1)}`;
 }
+const SUB = '₀₁₂₃₄₅₆₇₈₉';
+/** Display price. Tiny prices use subscript-zero notation: $0.0₄1230 = $0.00001230 (the subscript counts the zeros). */
 export function price(v: string | null | undefined): string {
-  if (v === null || v === undefined) return '—'; const n = Number(v); if (!isFinite(n)) return '—';
-  if (n >= 1) return `$${n.toFixed(4)}`;
-  const zeros = Math.max(0, Math.floor(-Math.log10(n)) - 1);
-  if (zeros >= 3) { const sig = (n * 10 ** (zeros + 1)).toFixed(3).replace('.', '').slice(0, 4); return `$0.0{${zeros}}${sig}`; }
+  if (v === null || v === undefined || v === '') return '—'; const n = Number(v); if (!isFinite(n) || n < 0) return '—';
+  if (n === 0) return '$0';
+  if (n >= 1) return `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: n >= 1000 ? 2 : 4 })}`;
+  const [mant, ex] = n.toExponential(3).split('e'); const e = Number(ex); // rounding is already applied here
+  const zeros = -e - 1;
+  if (zeros >= 4) return `$0.0${String(zeros).split('').map(d => SUB[+d]).join('')}${mant.replace('.', '')}`;
   return `$${n.toPrecision(4)}`;
 }
 export const pct = (bps: number | null | undefined) => bps === null || bps === undefined ? '—' : `${bps > 0 ? '+' : ''}${(bps / 100).toFixed(Math.abs(bps) >= 10000 ? 0 : 1)}%`;

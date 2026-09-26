@@ -55,16 +55,21 @@ export function TokenPage({ chain, address }: { chain: string; address: string }
   if (!tok) return <div className="page"><State loading={t.loading} error={t.error} onRetry={() => t.reload()} rows={10} /></div>;
   return <div className="page token">
     <div className="token-head">
-      <TokenAvatar symbol={tok.symbol} hue={tok.hue} chain={chain} size={48} />
-      <div><h1>{tok.symbol} <span className="muted">{tok.name}</span></h1><div className="small muted mono">{chain} · {short(address, 8)} <Copy text={address} /> <a className="link" href={tok.explorer} target="_blank" rel="noopener noreferrer">Explorer</a> · {tok.launchpad} · {tok.lifecycle.replace('_', ' ')} · {age(tok.ageSec)}</div></div>
+      <TokenAvatar symbol={tok.symbol} hue={tok.hue} size={48} />
+      <div className="token-head-id">
+        <h1>{tok.symbol}</h1>
+        {tok.name && tok.name.replace(/\s+/g, '').toLowerCase() !== tok.symbol.replace(/\s+/g, '').toLowerCase() && <div className="token-name muted">{tok.name}</div>}
+        <div className="small muted">{age(tok.ageSec)} old · <span className="mono">{short(address, 4)}</span> <Copy text={address} /> · <a className="link" href={tok.explorer} target="_blank" rel="noopener noreferrer">Explorer</a></div>
+      </div>
       <button className="icon-btn" aria-label="Add to watchlist" onClick={star}><I.star /></button>
       <div className="grow" />
-      <dl className="stats"><div><dt>Price</dt><dd>{price(priceNow)}</dd></div><div><dt>MC ({tok.mcBasis === 'circulating' ? 'circ.' : 'FDV≈'})</dt><dd>{usd(mc)}</dd></div><div><dt>Liquidity</dt><dd>{usd(tok.liqUsd)}</dd></div><div><dt>Holders</dt><dd>{tk?.h ?? tok.holders}</dd></div><div><dt>5m</dt><dd className={signCls(tk?.c5m ?? tok.change['5m'])}>{pct(tk?.c5m ?? tok.change['5m'])}</dd></div><div><dt>1h</dt><dd className={signCls(tk?.c1h ?? tok.change['1h'])}>{pct(tk?.c1h ?? tok.change['1h'])}</dd></div></dl>
+      <div className="token-head-price"><b>{price(priceNow)}</b><span className={cls('chip-pct', signCls(tk?.c1h ?? tok.change['1h']))}>{pct(tk?.c1h ?? tok.change['1h'])} <span className="muted">1h</span></span></div>
+      <dl className="stats"><div><dt>Market cap</dt><dd>{usd(mc)}</dd></div><div><dt>Liquidity</dt><dd>{usd(tok.liqUsd)}</dd></div><div><dt>Holders</dt><dd>{(tk?.h ?? tok.holders)?.toLocaleString?.() ?? '—'}</dd></div></dl>
       <SimTag />
     </div>
     <div className="token-grid">
       <div className="token-main">
-        <div className="panel"><div className="panel-bar"><Seg label="Interval" items={['1m', '5m', '15m', '1h', '4h']} value={iv} onChange={setIv} /><span className="muted small">USD · pool {short(k.data?.data.pool, 4)} · gaps shown shaded</span></div>
+        <div className="panel"><div className="panel-bar"><Seg label="Interval" items={['1m', '5m', '15m', '1h', '4h']} value={iv} onChange={setIv} /></div>
           <State loading={k.loading} error={k.error} onRetry={() => k.reload()} rows={8}>{k.data && <CandleChart rows={k.data.data.rows} />}</State></div>
         <div className="panel">
           <Tabs label="Token details" value={tab} onChange={setTab} items={[{ id: 'activity', label: 'Activity' }, { id: 'holders', label: 'Holders' }, { id: 'traders', label: 'Traders' }, { id: 'dev', label: 'Dev' }, { id: 'pools', label: 'Pools' }, { id: 'risk', label: 'Risk' }, { id: 'positions', label: 'My position' }]} />

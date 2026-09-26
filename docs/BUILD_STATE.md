@@ -1,6 +1,6 @@
 # JGG — Build State (checkpoint)
 
-_Last updated: 2026-09-25, session 7._
+_Last updated: 2026-09-26, session 8._
 
 ## Status in one line
 Demo/Paper terminal works end-to-end (web + API + worker + Postgres/RLS schema verified on Supabase). Nothing is live. See `docs/REQUIREMENTS.md` for every M/C/T item.
@@ -19,6 +19,15 @@ Demo/Paper terminal works end-to-end (web + API + worker + Postgres/RLS schema v
 - Load/soak script and results (scripts/load-test.mjs).
 - CLI + MCP stdio server over the scoped API (apps/cli/jgg.mjs).
 - Fixes: API-key strategies now drafts only; error-vs-empty precedence, offline shown as signed-out, layout JSON truncation; automation waits while submissions are unresolved.
+
+## Session 8 (owner: "simple, malinis, premium" + use my JGG logo everywhere)
+- Recovered the codebase from the session-7 export after the build container was reclaimed; the repo 2342556/JGG is now the source of truth (push after every checkpoint).
+- Brand: the owner's JGG monogram (docs/brand/jgg-mark-source.png) traced to one vector path in apps/web/src/brand.ts; in-app logo, favicon, PWA icons (192/512/maskable/apple-touch) all generated from it by scripts/brand-icons.mjs. White on #0B0B0C. Old green pixel mark + "JGG" wordmark removed. SW cache bumped to v3 so installed PWAs refresh icons.
+- Simpler UI: Trenches/Trending as one clean row list (avatar + risk dot, symbol/age, holders/bonded, MC + change, quick buy); Token header (name only if different, price + 1h chip, 3 stats); Auto = 3 style presets + plain-English plan + one-tap start (starter daily limits shown before the tap), plain position stages, one headline track-record number; AI = one ask box, answer with collapsible "how it was put together", skills as simple rows with one status pill.
+- price() fixed: printed a literal "{3}" and a stray zero; now $0.0₄1230 subscript notation from the rounded exponent.
+- Fixture token JGGDEMO → DEMO (no brand collision).
+- Evidence: 91/91 unit/API tests; typecheck clean; smoke 18 routes × 7 viewports 0 errors / 0 overflow, 6/6 flows; auto_mobile + live_ui e2e clean; pwa_a11y no violations.
+- Next: configurable exit system (initial SL / one-time partial TP by token quantity / trailing from post-activation peak, presets, per-trade override) — plan shown to owner first; paper only until owner approves.
 
 ## Session 7 (owner: "OA ba tayo? dapat bot na maganda ang winrate" → chose to strengthen accuracy over scope)
 - Finder outcome tracking (apps/api/src/live.ts + worker wiring + /api/v1/finder/stats + Auto page panel): every Finder pass is followed forward on curve price alone (no extra RPC calls), classified rugged/graduated/timeout_24h, reported as hit-rate-by-horizon with explicit small-sample caveats. This is the evidence for "malaking winrate" — independent of any single user's trades, and visible before any real money is risked.

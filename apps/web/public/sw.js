@@ -1,7 +1,7 @@
 // JGG service worker (T56): caches the app shell only. API calls are never cached or queued,
 // so nothing (orders, approvals) can be replayed when connectivity returns.
-const CACHE = 'jgg-shell-v2';
-const SHELL = ['/', '/index.html', '/assets/app.js', '/assets/app.css', '/favicon.svg', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png', '/apple-touch-icon.png'];
+const CACHE = 'jgg-shell-v3';
+const SHELL = ['/', '/index.html', '/assets/app.js', '/assets/app.css', '/favicon.svg', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png', '/apple-touch-icon.png', '/icon-maskable-512.png'];
 self.addEventListener('install', e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting())); });
 self.addEventListener('activate', e => { e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k !== CACHE).map(k => caches.delete(k)))).then(() => self.clients.claim())); });
 self.addEventListener('fetch', e => {

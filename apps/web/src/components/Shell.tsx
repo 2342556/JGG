@@ -1,16 +1,19 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, useRouter } from '../router.tsx';
 import { api } from '../api.ts';
+import { MARK_PATH, MARK_W, MARK_H, BRAND_BG, BRAND_FG } from '../brand.ts';
 import { useApp, useApi, I, CHAINS, CHAIN_LABEL, ModeBadge, cls, short, usd, age, useSlashFocus, Drawer, Tabs, State, toast, errMsg, useTicks, TokenAvatar } from '../lib.tsx';
 
-export const Logo = () => <Link to="/trenches" className="logo" aria-label="JGG home">
-  <svg width="28" height="28" viewBox="0 0 28 28" aria-hidden="true">
-    {/* Original JGG pixel monogram: three stacked blocks forming a J and two G hooks */}
-    <rect width="28" height="28" rx="7" fill="#65D08D" />
-    <path d="M6 8h4v9a3 3 0 01-3 3H5v-3h1a1 1 0 000-1z M12 8h5v3h-2v6h2v-2h-1v-2h4v7h-8z M20 8h3v3h-3z" fill="#0B0B0C" />
-  </svg>
-  <span className="wordmark">JGG</span>
-</Link>;
+export const Logo = ({ size = 30 }: { size?: number }) => <Link to="/trenches" className="logo" aria-label="JGG home"><BrandMark size={size} /></Link>;
+
+/** The owner's JGG monogram, white on black — same path as favicon and PWA icons (brand.ts). */
+export function BrandMark({ size = 30 }: { size?: number }) {
+  const s = 76 / MARK_W;
+  return <svg className="brand-mark" width={size} height={size} viewBox="0 0 100 100" aria-hidden="true">
+    <rect width="100" height="100" rx="22" fill={BRAND_BG} />
+    <path transform={`translate(${(100 - MARK_W * s) / 2} ${(100 - MARK_H * s) / 2}) scale(${s})`} fill={BRAND_FG} d={MARK_PATH} />
+  </svg>;
+}
 
 const NAV = [['/trenches', 'Trenches'], ['/auto', 'Auto'], ['/trending', 'Trending'], ['/copy-trade/rank', 'CopyTrade'], ['/monitor', 'Monitor'], ['/track', 'Track'], ['/portfolio', 'Portfolio'], ['/rewards', 'Rewards'], ['/up-down', 'Up/Down'], ['/perpetuals', 'Perpetual']] as const;
 
@@ -163,6 +166,7 @@ export function AuthModal() {
   }
   return <Drawer open={authOpen} onClose={() => setAuthOpen(false)} title="Log in to JGG">
     <div className="auth">
+      <div className="auth-brand"><BrandMark size={56} /></div>
       <button className="btn big" disabled={busy} onClick={async () => { setBusy(true); try { await signInDemo(); } catch (e) { setMsg(errMsg(e)); } finally { setBusy(false); } }}>Continue with a Demo account</button>
       <p className="muted fine">Demo: simulated data, virtual balances (10 SOL · 5 BNB · 1 ETH per chain), no real funds.</p>
       <hr />

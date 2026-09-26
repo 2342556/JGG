@@ -45,8 +45,8 @@ function makeToken(chain: Chain, i: number): FixtureToken {
   let symbol = (pick(SYL) + pick(SYL) + (r() < 0.4 ? pick(SYL) : '')).toUpperCase().slice(0, 9);
   let name = `${symbol.charAt(0)}${symbol.slice(1).toLowerCase()} ${pick(WORDS)}`;
   // Deliberate identity traps for T10 / C03: same symbol on two chains + a same-chain copycat.
-  if (i === 0) { symbol = 'JGGDEMO'; name = 'JGG Demo Token'; }
-  if (i === 1 && chain === 'solana') { symbol = 'JGGDEMO'; name = 'JGG Demo Token (copycat)'; }
+  if (i === 0) { symbol = 'DEMO'; name = 'Demo Coin'; }
+  if (i === 1 && chain === 'solana') { symbol = 'DEMO'; name = 'Demo Coin (copycat)'; }
   const lifecycle: Lifecycle = i % 3 === 0 ? 'migrated' : i % 3 === 1 ? 'near_completion' : 'new';
   const ageMin = lifecycle === 'new' ? Math.floor(r() * 90) - 60 : lifecycle === 'near_completion' ? 20 + Math.floor(r() * 200) : 60 + Math.floor(r() * 3000);
   const decimals = chain === 'solana' ? (r() < 0.8 ? 6 : 9) : 18;

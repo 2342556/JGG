@@ -27,9 +27,8 @@ with sync_playwright() as p:
             pg.screenshot(path='docs/screenshots/live_1440_trading_wallet.png')
             pg.goto(BASE + '/auto'); pg.wait_for_timeout(1000)
             res['checks']['finder_rows'] = pg.locator('.finder-row').count()
-            pg.get_by_label('Min finder score').fill('40')  # the seeded coin scores 45; default 50 correctly buys nothing
-            pg.get_by_role('button', name='Use these limits').click(); pg.wait_for_timeout(600)
-            pg.get_by_role('button', name='Start auto trader (paper)').click(); pg.wait_for_timeout(6000)
+            pg.get_by_text('Fine-tune the numbers').click(); pg.get_by_label('Min quality score').fill('40')  # the seeded coin scores 45; default 50 correctly buys nothing
+            pg.get_by_role('button', name='Start auto trader', exact=True).click(); pg.wait_for_timeout(6000)
             res['checks']['auto_positions'] = pg.locator('.pos-list li').count()
             res['checks']['auto_first_position'] = pg.locator('.pos-list li').first.inner_text()[:60] if res['checks']['auto_positions'] else None
             pg.screenshot(path='docs/screenshots/live_1440_auto_running.png', full_page=True)

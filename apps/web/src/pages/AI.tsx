@@ -1,70 +1,55 @@
 import { useMemo, useState } from 'react';
 import { Link, useQueryState } from '../router.tsx';
 import { api } from '../api.ts';
-import { useApp, useApi, State, Tabs, Drawer, I, cls, toast, errMsg, short, Seg, CHAINS } from '../lib.tsx';
+import { useApp, useApi, State, Tabs, Drawer, I, cls, toast, errMsg, short, CHAINS } from '../lib.tsx';
 
-const STAGES = [['screening', 'Screening', 'market.trending, signals.*'], ['analysis', 'Analysis', 'token.dd, token.info, wallet.analysis'], ['proposal', 'Order proposal', 'trade.* → intent awaiting approval'], ['monitoring', 'Position monitoring', 'strategies + worker'], ['alerts', 'Risk alerts', 'alerts + notifications']] as const;
-const stageOf = (tool: string) => tool.startsWith('market.') || tool.startsWith('signals.') ? 'screening' : tool.startsWith('token.') || tool.startsWith('wallet.') || tool.startsWith('dev.') ? 'analysis' : tool.startsWith('trade.') ? 'proposal' : tool.startsWith('strategy.') || tool.startsWith('orders.') ? 'monitoring' : 'alerts';
 const STATUS_LABEL: Record<string, string> = { implemented_demo: 'Demo', implemented_paper: 'Paper', blocked_external: 'Needs provider', verified_live: 'Live', implemented_live_unverified: 'Live (unverified)', unsupported_by_selected_provider: 'Unsupported', not_started: 'Not started', in_progress: 'In progress' };
 
 export function AIPage() {
   const { me, chain, openAuth } = useApp();
   const [prompt, setPrompt] = useState(''); const [run, setRun] = useState<any>(null); const [busy, setBusy] = useState(false);
   const skills = useApi<any>('/skills', []);
-  const [cat, setCat] = useQueryState('cat', 'All'); const [q, setQ] = useQueryState('q', ''); const [src, setSrc] = useQueryState('src', 'all');
+  const [cat, setCat] = useQueryState('cat', 'All'); const [q, setQ] = useQueryState('q', ''); 
   const [detail, setDetail] = useQueryState('skill', '');
-  const list = useMemo(() => (skills.data?.skills ?? []).filter((s: any) => (cat === 'All' || s.category === cat) && (src === 'all' || s.source === src) && (!q || (s.title + ' ' + s.summary + ' ' + s.id).toLowerCase().includes(q.toLowerCase()))), [skills.data, cat, q, src]);
+  const list = useMemo(() => (skills.data?.skills ?? []).filter((s: any) => (cat === 'All' || s.category === cat) && (!q || (s.title + ' ' + s.summary + ' ' + s.id).toLowerCase().includes(q.toLowerCase()))), [skills.data, cat, q]);
   async function ask(p = prompt) {
     if (!me) return openAuth(); if (!p.trim()) return;
     setBusy(true); try { setRun(await api('/ai/runs', { method: 'POST', body: { prompt: p, chain } })); } catch (e) { toast(errMsg(e), 'err'); } finally { setBusy(false); }
   }
-  const hit = new Set((run?.steps ?? []).map((s: any) => stageOf(s.tool)));
+  const modeKey = me?.settings.mode === 'live' ? 'live' : me?.settings.mode === 'paper' ? 'paper' : 'demo';
   return <div className="page ai">
     <div className="ai-wrap">
-      <section className="ai-hero">
-        <div>
-          <h1>Trade with an AI copilot that shows its work</h1>
-          <p className="lede">Screen, research and draft orders with JGG's 66 skills. Every figure comes from a tool call you can inspect, and nothing executes until you approve it.</p>
-          <div className="ask">
-            <textarea rows={2} value={prompt} onChange={e => setPrompt(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); ask(); } }} placeholder='Try "trending on solana", "smart money buys", or "analyze <token address>"' aria-label="Ask the JGG agent" />
-            <button className="btn big" disabled={busy} onClick={() => ask()}>{busy ? 'Running…' : me ? 'Run' : 'Log in to run'}</button>
-          </div>
-          <div className="chips">{['Top trending tokens right now', 'Smart money buy clusters', 'Any price surges?', 'Gas fees'].map(x => <button key={x} className="chip" onClick={() => { setPrompt(x); ask(x); }}>{x}</button>)}</div>
+      <section className="ai-hero simple">
+        <h1>Ask JGG anything</h1>
+        <p className="lede">Find coins, check a token, or see what smart wallets are buying. Nothing is bought until you approve it.</p>
+        <div className="ask">
+          <textarea rows={2} value={prompt} onChange={e => setPrompt(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); ask(); } }} placeholder="e.g. What's trending on Solana?" aria-label="Ask the JGG agent" />
+          <button className="btn big" disabled={busy} onClick={() => ask()}>{busy ? 'Thinking…' : me ? 'Ask' : 'Log in to ask'}</button>
         </div>
-        <div className="panel pad install">
-          <h2>Use JGG from your own agent</h2>
-          <p className="muted small">Scoped API keys (Settings → API keys). Same tools and validation as this page. Trade scopes create proposals only.</p>
-          <pre className="code">{`curl -H "Authorization: Bearer $JGG_API_KEY" \\
-  "${location.origin}/api/v1/skills/C05/run" \\
-  -X POST -H 'content-type: application/json' \\
-  -d '{"inputs":{"chain":"solana","address":"<mint>"}}'`}</pre>
-          <Link className="btn ghost" to="/settings?tab=api"><I.key /> Manage API keys</Link>
-        </div>
+        <div className="chips">{['Top trending tokens right now', 'Smart money buy clusters', 'Any price surges?', 'Gas fees'].map(x => <button key={x} className="chip" onClick={() => { setPrompt(x); ask(x); }}>{x}</button>)}</div>
       </section>
 
-      <section className="panel trader" aria-label="AI trader run">
-        <div className="panel-bar"><strong>AI trader</strong><span className="b">Rule-based planner (no LLM configured)</span>{!run && <span className="b warn">Demo — run a prompt to see real events</span>}</div>
-        <ol className="stages">{STAGES.map(([id, label, tools]) => <li key={id} className={cls(hit.has(id) && 'on')}><strong>{label}</strong><span className="muted small">{tools}</span></li>)}</ol>
-        {run && <div className="run">
-          <div className="answer">{run.answer.map((a: string, i: number) => <p key={i}>{a}</p>)}</div>
-          <details open><summary>{run.steps.length} tool call(s) · {run.planner.id}</summary><ul className="plain">{run.steps.map((s: any) => <li key={s.id}><span className={cls('b', s.status === 'succeeded' ? 'pos' : s.status === 'denied' ? 'warn' : 'neg')}>{s.status}</span> <code>{s.tool}</code> <span className="muted small">— {s.why}</span>{s.result?.intentId && <> · <Link className="link" to="/portfolio?tab=orders">proposal {short(s.result.intentId, 5)} awaiting your approval</Link></>}</li>)}</ul></details>
-          <p className="muted small">{run.untrustedContentNote} {run.planner.note}</p>
-        </div>}
-      </section>
+      {run && <section className="panel pad answer-panel" aria-label="Answer">
+        <div className="answer">{run.answer.map((a: string, i: number) => <p key={i}>{a}</p>)}</div>
+        {run.steps.some((s: any) => s.result?.intentId) && <p><Link className="link" to="/portfolio?tab=orders">A trade proposal is waiting for your approval →</Link></p>}
+        <details className="small"><summary>How this answer was put together</summary>
+          <ul className="plain">{run.steps.map((s: any) => <li key={s.id}><span className={cls('b', s.status === 'succeeded' ? 'pos' : s.status === 'denied' ? 'warn' : 'neg')}>{s.status}</span> <code>{s.tool}</code> <span className="muted">— {s.why}</span>{s.result?.intentId && <> · proposal {short(s.result.intentId, 5)}</>}</li>)}</ul>
+          <p className="muted">{run.untrustedContentNote} {run.planner.note}</p></details>
+      </section>}
 
       <section className="skills" aria-label="Skills Market">
-        <div className="skills-head"><h2>Skills Market</h2><div className="grow" />
+        <div className="skills-head"><h2>Skills</h2><div className="grow" />
           <div className="search small"><I.search /><input value={q} onChange={e => setQ(e.target.value)} placeholder="Search skills" aria-label="Search skills" /></div>
-          <Seg label="Source" items={[{ id: 'all', label: 'All sources' }, { id: 'JGG', label: 'JGG' }, { id: '6551', label: '6551' }, { id: 'X', label: 'X' }]} value={src} onChange={setSrc} />
         </div>
         <Tabs label="Skill categories" value={cat as any} onChange={setCat} items={(skills.data?.categories ?? ['All']).map((c: string) => ({ id: c, label: c }))} />
         <State loading={skills.loading} error={skills.error} onRetry={() => skills.reload()} empty={!list.length && 'No skills match.'}>
-          <div className="skill-grid">{list.map((s: any) => <article key={s.id} className="skill-card">
-            <div className="skill-top"><span className="skill-icon" aria-hidden="true">{s.icon}</span><div><h3>{s.title}</h3><span className="muted small">{s.source} · {s.category} · {s.id}</span></div></div>
-            <p className="clamp2">{s.summary}</p>
-            <div className="skill-foot"><span className={cls('b', s.status.demo.startsWith('implemented') ? 'pos' : 'warn')} title={s.blocker}>{STATUS_LABEL[s.status[me?.settings.mode === 'paper' ? 'paper' : 'demo']]}</span><span className="b" title="Live status">Live: {STATUS_LABEL[s.status.live]}</span><div className="grow" /><button className="btn sm" onClick={() => setDetail(s.id)}>Detail</button></div>
-          </article>)}</div>
-          <p className="muted small pad">{skills.data?.note}</p>
+          <div className="skill-grid">{list.map((s: any) => { const st = s.status[modeKey]; const ok = String(st).startsWith('implemented') || st === 'verified_live';
+            return <button key={s.id} className="skill-card" onClick={() => setDetail(s.id)} aria-label={`${s.title} — ${STATUS_LABEL[st] ?? st}`}>
+              <span className="skill-icon" aria-hidden="true">{s.icon}</span>
+              <span className="skill-text"><b>{s.title}</b><span className="clamp2 muted">{s.summary}</span></span>
+              <span className={cls('b', ok ? 'pos' : 'warn')} title={s.blocker}>{ok ? 'Ready' : STATUS_LABEL[st] ?? st}</span>
+            </button>; })}</div>
+          <p className="muted small pad">Use these from your own agent with an <Link className="link" to="/settings?tab=api">API key</Link>.</p>
         </State>
       </section>
       {me && <RunHistory />}
