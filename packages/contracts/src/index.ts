@@ -129,8 +129,18 @@ export const presetSchema = v.object({
   buyAmounts: v.array(v.decimal({ positive: true }), { min: 1, max: 6 }), slippageBps: v.int({ min: 1, max: 5000 }),
   maxFee: v.decimal(), mevProtect: v.boolean(), exitTemplate: v.enum(['none', 'tp_sl_basic', 'trailing_tp', 'trailing_sl'] as const),
 });
+// Exit plan (owner spec 2026-09-26). Percentages are decimal strings; ranges and cross-rule rules are checked by domain validateExitConfig.
+const pctStr = v.string({ min: 1, max: 12, pattern: /^\d{1,6}(\.\d{1,4})?$/ });
+export const exitConfigSchema = v.object({
+  stopLoss: v.object({ enabled: v.boolean(), pct: pctStr }),
+  partialTp: v.object({ enabled: v.boolean(), triggerPct: pctStr, sellPct: pctStr }),
+  trailing: v.object({ enabled: v.boolean(), pct: pctStr, activation: v.enum(['after_partial', 'at_gain', 'immediate'] as const), activationGainPct: pctStr.optional() }),
+});
+export const exitPresetSave = v.object({ name: v.string({ min: 1, max: 40, pattern: /^[\p{L}\p{N} ._\-]+$/u }), config: exitConfigSchema, version: v.int({ min: 0 }).optional() });
+export const exitPreview = v.object({ config: exitConfigSchema, chain: chainSchema, tokenAddress: v.string({ min: 32, max: 44 }).optional(), walletId: v.string({ min: 1, max: 64 }).optional(), amount: v.decimal({ positive: true }).optional(), strategyId: v.string({ min: 1, max: 64 }).optional() });
+export const exitOverride = v.object({ config: exitConfigSchema, version: v.int({ min: 0 }) });
 export const strategyCreate = v.object({
-  kind: v.enum(['limit_buy', 'limit_sell', 'tp_sl', 'trailing_tp', 'trailing_sl', 'limit_buy_tp_sl', 'copy', 'migration_buy', 'dev_sell_exit', 'dev_snipe', 'token_snipe', 'snipex', 'auto_trader'] as const),
+  kind: v.enum(['limit_buy', 'limit_sell', 'tp_sl', 'trailing_tp', 'trailing_sl', 'limit_buy_tp_sl', 'copy', 'migration_buy', 'dev_sell_exit', 'dev_snipe', 'token_snipe', 'snipex', 'auto_trader', 'position_exit'] as const),
   chain: chainSchema, tokenAddress: v.string({ min: 32, max: 44 }).optional(), walletId: v.string({ min: 1, max: 64 }),
   params: v.object({
     targetPrice: v.decimal({ positive: true }).optional(), amount: v.decimal({ positive: true }).optional(),
@@ -142,7 +152,7 @@ export const strategyCreate = v.object({
     maxEventAgeSec: v.int({ min: 1, max: 3600 }).optional(), creatorWallet: v.string({ min: 32, max: 44 }).optional(),
     minScore: v.int({ min: 0, max: 100 }).optional(), maxPositions: v.int({ min: 1, max: 20 }).optional(), scanEverySec: v.int({ min: 5, max: 3600 }).optional(),
     partialBps: v.int({ min: 0, max: 9900 }).optional(), trailActivation: v.decimal({ positive: true }).optional(), tpGain: v.decimal({ positive: true }).optional(),
-    maxAmount: v.decimal({ positive: true }).optional(),
+    maxAmount: v.decimal({ positive: true }).optional(), exit: exitConfigSchema.optional(),
   }, { strict: true }),
 });
 export const alertCreate = v.object({

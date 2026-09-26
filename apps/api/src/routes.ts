@@ -4,6 +4,7 @@ import { ApiError, Router, validate, newId, type Ctx } from './http.ts';
 import * as A from './auth.ts';
 import * as T from './trading.ts';
 import * as S from './strategies.ts';
+import * as X from './exits.ts';
 import * as Tools from './tools.ts';
 import * as G from '../../../packages/providers/src/gmgn.ts';
 import * as L from './live.ts';
@@ -321,6 +322,16 @@ export function buildRouter(db: DB, cfg: AppCfg, live?: { rpc: Rpc; deps: Parame
       const v = S.setStrategyLifecycle(db, uid(c), c.params.id, a, dn());
       return a === 'pause' ? { ...v, inFlight: qa(db, `SELECT id, state FROM orders WHERE strategy_id = ? AND state IN ('submitting','submitted','reconciliation_required')`, c.params.id) } : v;
     }, { auth: true, scope: 'strategy:manage' });
+
+  // ---------------- Exit system: presets, exact preview, per-position override ----------------
+  r.add('GET', '/api/v1/exit-presets', (c) => X.listExitPresets(db, uid(c)), { auth: true });
+  r.add('PUT', '/api/v1/exit-presets', (c) => X.saveExitPreset(db, uid(c), validate(C.exitPresetSave, c.body) as any, dn()), { auth: true, scope: 'strategy:manage' });
+  r.add('DELETE', '/api/v1/exit-presets/:id', (c) => X.deleteExitPreset(db, uid(c), c.params.id), { auth: true, scope: 'strategy:manage' });
+  r.add('POST', '/api/v1/exits/preview', (c) => X.exitPreview(db, c.userId ?? null, validate(C.exitPreview, c.body) as any, dn()));
+  r.add('PUT', '/api/v1/strategies/:id/exit', (c) => {
+    if (c.authKind !== 'session') throw new ApiError('FORBIDDEN', 'Changing a live position\'s exits requires the owner in an interactive session', 403);
+    return X.overrideExit(db, uid(c), c.params.id, validate(C.exitOverride, c.body) as any, dn());
+  }, { auth: true, scope: 'strategy:manage' });
 
   // ---------------- Watchlists / tracked wallets / alerts / notifications ----------------
   r.add('GET', '/api/v1/watchlists', (c) => {

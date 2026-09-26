@@ -33,11 +33,14 @@ function poolFor(chain: Chain, token: string, now: number) {
 }
 
 // ---------------- Market source (fixture by default; the standalone Solana indexer when configured) ----------------
+export type PriceObs = { usd: string | null; at: number | null; source: string; staleReason: string | null };
 export type QuoteResult = { ok: true; quote: PaperQuote } | { ok: false; code: string };
 export type MarketSource = {
   kind: 'fixture' | 'solana_live'; label: string;
   now(): number;
   priceUsd(chain: Chain, token: string, now: number): string | null;
+  /** Price with the time it was known to be valid, for exits (stale prices must never trigger a sale). */
+  priceObs?(chain: Chain, token: string, now: number): PriceObs;
   quote(chain: Chain, token: string, side: 'buy' | 'sell', amount: string, slippageBps: number, now: number, ttlMs?: number, opts?: { live?: boolean }): QuoteResult;
   finderCandidates(chain: Chain, now: number): D.FinderInput[];
   finderConfig?: D.FinderConfig; finderExclude?: string[];

@@ -301,7 +301,9 @@ export function applyFill(db: DB, userId: string, orderId: string, filledOut: st
   if (dup) return; // T15: duplicate delivery does not duplicate trades/P&L
   const i = q1(db, `SELECT * FROM trade_intents WHERE id = ?`, o.intent_id);
   const native = CHAIN_META[o.chain as Chain].native; const nusd = nativeUsdOf(o.chain as Chain, now);
-  run(db, `INSERT INTO fills (id, order_id, chain_fill_id, qty_in, qty_out, fee_native, at) VALUES (?, ?, ?, ?, ?, ?, ?)`, newId('fil'), orderId, chainFillId, o.amount_in, filledOut, networkFee, now);
+  // unit_usd = USD per token of this fill (buy: SOL in ÷ tokens out; sell: SOL out ÷ tokens in), excluding network fees.
+  const fillUnitUsd = D.gt(o.side === 'buy' ? filledOut : o.amount_in, '0') ? D.str(D.rescale(o.side === 'buy' ? D.div(D.mul(o.amount_in, nusd), filledOut, 18) : D.div(D.mul(filledOut, nusd), o.amount_in, 18), 18)) : null;
+  run(db, `INSERT INTO fills (id, order_id, chain_fill_id, qty_in, qty_out, fee_native, at, unit_usd) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, newId('fil'), orderId, chainFillId, o.amount_in, filledOut, networkFee, now, fillUnitUsd);
   if (i.reservation_id) releaseReservation(db, i.reservation_id, true);
   const bucket = o.strategy_id ? (q1(db, `SELECT bucket FROM strategies WHERE id = ?`, o.strategy_id)?.bucket ?? o.strategy_id) : 'manual';
   const lot = q1(db, `SELECT * FROM position_lots WHERE wallet_id = ? AND chain = ? AND token = ? AND bucket = ?`, i.wallet_id, o.chain, o.token, bucket);
@@ -325,7 +327,8 @@ export function applyFill(db: DB, userId: string, orderId: string, filledOut: st
     const q = D.min(o.amount_in, b.knownQty);
     if (D.gt(q, '0')) b = D.applySell(b, D.str(q), D.str(unitUsd), D.str(D.mul(networkFee, nusd))).bucket;
   }
-  if (lot) run(db, `UPDATE position_lots SET known_qty = ?, known_basis = ?, realized = ?, version = version + 1 WHERE id = ?`, D.str(b.knownQty), D.str(b.knownBasis), D.str(b.realized), lot.id);
+  if (lot) run(db, `UPDATE position_lots SET known_qty = ?, known_basis = ?, realized = ?, opened_at = CASE WHEN ? THEN ? ELSE opened_at END, version = version + 1 WHERE id = ?`,
+    D.str(b.knownQty), D.str(b.knownBasis), D.str(b.realized), o.side === 'buy' && D.isZero(lot.known_qty) ? 1 : 0, now, lot.id); // a buy into a flat lot starts a new episode (entry price counts from here)
   else run(db, `INSERT INTO position_lots (id, user_id, wallet_id, chain, token, bucket, known_qty, known_basis, realized, opened_at) VALUES (?,?,?,?,?,?,?,?,?,?)`, newId('lot'), userId, i.wallet_id, o.chain, o.token, bucket, D.str(b.knownQty), D.str(b.knownBasis), D.str(b.realized), now);
   run(db, `UPDATE orders SET filled_out = ?, fee_native = ? WHERE id = ?`, filledOut, networkFee, orderId);
   orderTransition(db, orderId, 'confirmed', { filledOut }, now);

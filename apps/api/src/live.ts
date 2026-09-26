@@ -4,7 +4,7 @@ import { type DB, tx, q1, qa, run } from './db.ts';
 import * as D from '../../../packages/domain/src/index.ts';
 import * as P from '../../../packages/providers/src/solana/pump.ts';
 import type { Rpc } from '../../../packages/providers/src/solana/rpc.ts';
-import { type MarketSource, type QuoteResult, NETWORK_FEE, PRIORITY_FEE } from '../../../packages/providers/src/execution.ts';
+import { type MarketSource, type QuoteResult, type PriceObs, NETWORK_FEE, PRIORITY_FEE } from '../../../packages/providers/src/execution.ts';
 import type { Chain } from '../../../packages/contracts/src/index.ts';
 
 export const LIVE_MODEL = { id: 'jgg-pump-curve-v1', description: 'Paper fills on the live pump.fun bonding curve: x*y=k on virtual reserves from the latest indexed TradeEvent, fee = latest observed protocol+creator bps (fallback 125 bps, flagged).' };
@@ -137,6 +137,51 @@ export function setSolUsd(db: DB, usd: string, source: string, at: number) {
   run(db, `INSERT INTO worker_state (key, value, updated_at) VALUES ('sol_usd', ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`, JSON.stringify({ usd, source, at }), Date.now());
 }
 
+// ---------------- Price freshness for exits (owner decision: USD triggers) ----------------
+// A USD price is only as fresh as BOTH inputs: the coin's curve reserves (valid while the indexer's log stream is live and
+// the coin has traded since the stream (re)connected — trades missed during a gap would make old reserves wrong) and the
+// SOL/USD rate. Graduated coins use Jupiter Price v3 (ext_prices, refreshed by the indexer for coins with active exits).
+export const EXIT_PRICE_LIMITS = { heartbeatMs: 10_000, solUsdMs: 180_000, extPriceMs: 60_000 };
+export function livePriceObs(db: DB, chain: Chain, token: string, now: number): PriceObs {
+  const none = (staleReason: string, usd: string | null = null, at: number | null = null, source = 'jgg-indexer'): PriceObs => ({ usd, at, source, staleReason });
+  if (chain !== 'solana') return none('CHAIN_UNSUPPORTED');
+  const t = tokenState(db, token); if (!t) return none('TOKEN_NOT_INDEXED');
+  const u = solUsd(db, now);
+  if (t.complete) {
+    const x = q1(db, `SELECT usd, source, at FROM ext_prices WHERE chain = 'solana' AND mint = ?`, token);
+    if (!x) return none('GRADUATED_NO_EXTERNAL_PRICE', null, null, 'jupiter-price-v3');
+    if (now - x.at > EXIT_PRICE_LIMITS.extPriceMs) return none('EXTERNAL_PRICE_STALE', x.usd, x.at, x.source);
+    return { usd: x.usd, at: x.at, source: x.source, staleReason: null };
+  }
+  const p = priceSolDec(t); if (!p) return none('NO_RESERVES');
+  if (!u) return none('SOL_USD_UNAVAILABLE');
+  const usd = D.str(D.rescale(D.mul(p, u.usd), 12));
+  if (now - u.at > EXIT_PRICE_LIMITS.solUsdMs) return none('SOL_USD_STALE', usd, u.at);
+  const ix = q1(db, `SELECT value, updated_at FROM worker_state WHERE key = 'indexer'`);
+  if (!ix || now - ix.updated_at > EXIT_PRICE_LIMITS.heartbeatMs) return none('INDEXER_DOWN', usd, ix?.updated_at ?? null);
+  const v = JSON.parse(ix.value);
+  if (v.conn !== 'live') return none('STREAM_NOT_LIVE', usd, ix.updated_at);
+  if (v.liveSince && (!t.last_trade_at || t.last_trade_at < v.liveSince)) return none('NO_TRADE_SINCE_RECONNECT', usd, t.last_trade_at ?? null);
+  return { usd, at: Math.min(ix.updated_at, now), source: 'pump-curve × SOL/USD', staleReason: null };
+}
+
+/** Jupiter Price v3 for graduated coins that have active exits (curve price no longer applies). Missing = unknown, never 0. */
+export function graduatedExitMints(db: DB): string[] {
+  return qa(db, `SELECT DISTINCT s.token FROM strategies s JOIN live_tokens t ON t.mint = s.token WHERE s.kind = 'position_exit' AND s.chain = 'solana' AND s.lifecycle IN ('active','paused') AND t.complete = 1 LIMIT 50`).map(r => r.token as string);
+}
+/** JSON number → exact decimal string without exponent notation (String(1.2e-7) is "1.2e-7", which exact math rejects). 15 significant digits. */
+export function numToDec(n: number): string {
+  if (typeof n !== 'number' || !Number.isFinite(n) || n <= 0) throw new Error('NOT_A_POSITIVE_NUMBER');
+  const [m, e] = n.toExponential(14).split('e'); const exp = Number(e); const digits = m.replace('.', '').replace(/0+$/, '') || '0';
+  if (exp < 0) return '0.' + '0'.repeat(-exp - 1) + digits;
+  const int = digits.padEnd(exp + 1, '0').slice(0, exp + 1); const frac = digits.slice(exp + 1);
+  return frac ? `${int}.${frac}` : int;
+}
+export function setExtPrice(db: DB, mint: string, usd: string, source: string, at: number) {
+  if (!D.gt(usd, '0')) return;
+  run(db, `INSERT INTO ext_prices (chain, mint, usd, source, at) VALUES ('solana', ?, ?, ?, ?) ON CONFLICT(chain, mint) DO UPDATE SET usd = excluded.usd, source = excluded.source, at = excluded.at`, mint, usd, source, at);
+}
+
 // ---------------- The live market source ----------------
 const lamportsToSol = (x: bigint) => D.rawToDec(x.toString(), 9);
 function tokenState(db: DB, mint: string) { return q1(db, `SELECT * FROM live_tokens WHERE mint = ?`, mint); }
@@ -163,6 +208,7 @@ export function createLiveSource(db: DB, opts: { finderConfig?: Partial<D.Finder
       if (t.complete) return null; // graduated: curve price is no longer the market price (PumpSwap not indexed in v1)
       return D.str(D.rescale(D.mul(p, u.usd), 12));
     },
+    priceObs(chain, token, now) { return livePriceObs(db, chain, token, now); },
     quote(chain, token, side, amount, slippageBps, now, ttlMs = 15_000, qopts?: { live?: boolean }): QuoteResult {
       if (!onlySolana(chain)) return { ok: false, code: 'CHAIN_UNSUPPORTED' };
       try { D.validateSlippageBps(slippageBps, true); } catch { return { ok: false, code: 'SLIPPAGE_OUT_OF_RANGE' }; }
@@ -171,13 +217,18 @@ export function createLiveSource(db: DB, opts: { finderConfig?: Partial<D.Finder
       if (t.complete) {
         // Live-only: a graduated coin can still be SOLD through Jupiter. The approval context is a price floor from the last curve
         // price (pump migration keeps price continuity); Jupiter's actual output must meet minOut or the order fails with no funds moved.
-        if (!(qopts?.live && side === 'sell')) return { ok: false, code: 'CURVE_COMPLETE' };
+        // Paper (owner decision 2026-09-26): graduated sells are modeled at the fresh Jupiter price (no price impact modeled, disclosed in the route).
+        if (side !== 'sell') return { ok: false, code: 'CURVE_COMPLETE' };
         const u0 = solUsd(db, now); if (!u0) return { ok: false, code: 'NO_SOL_USD' };
+        const ext = q1(db, `SELECT usd, at FROM ext_prices WHERE chain = 'solana' AND mint = ?`, token); const extFresh = ext && now - ext.at <= EXIT_PRICE_LIMITS.extPriceMs;
+        if (!qopts?.live && !extFresh) return { ok: false, code: 'CURVE_COMPLETE' };
         let tokRaw: bigint; try { tokRaw = BigInt(D.decToRaw(amount, 6)); } catch { return { ok: false, code: 'AMOUNT_PRECISION' }; }
-        const lastOut = (tokRaw * BigInt(t.v_sol)) / BigInt(t.v_tok); if (lastOut <= 0n) return { ok: false, code: 'NO_OUTPUT' };
+        // Floor from the fresh Jupiter price when known (a stale last-curve floor would make a stop-loss fail after a post-graduation drop).
+        const lastOut = extFresh ? BigInt(D.decToRaw(D.str(D.rescale(D.div(D.mul(D.rawToDec(tokRaw.toString(), 6), ext.usd), u0.usd, 18), 9, 'floor')), 9)) : (tokRaw * BigInt(t.v_sol)) / BigInt(t.v_tok);
+        if (lastOut <= 0n) return { ok: false, code: 'NO_OUTPUT' };
         const minOut = D.minimumOutRaw(lastOut.toString(), slippageBps);
         return { ok: true, quote: { chain, token, side, amountIn: amount, assetIn: t.symbol ?? 'TOKEN', expectedOut: D.str(D.rawToDec(lastOut.toString(), 9)), assetOut: 'SOL', minOut: D.str(D.rawToDec(minOut, 9)),
-          slippageBps, priceImpactBps: 0, executionPriceUsd: '0', route: 'jupiter (graduated; floor = last curve price − slippage)', fees: [{ kind: 'network', amount: NETWORK_FEE.solana, asset: 'SOL', includedInQuotedOutput: false, note: 'Estimated' }],
+          slippageBps, priceImpactBps: 0, executionPriceUsd: '0', route: extFresh ? (qopts?.live ? 'jupiter (graduated; floor = Jupiter price − slippage)' : 'paper: graduated coin at Jupiter price (price impact NOT modeled)') : 'jupiter (graduated; floor = last curve price − slippage)', fees: [{ kind: 'network', amount: NETWORK_FEE.solana, asset: 'SOL', includedInQuotedOutput: false, note: 'Estimated' }],
           quotedAt: now, expiresAt: now + ttlMs, model: 'jgg-graduated-floor-v1', decimalsOut: 9 } };
       }
       if (!t.last_trade_at || now - t.last_trade_at > 15 * 60_000) return { ok: false, code: 'STALE_DATA' }; // reserves too old to trust

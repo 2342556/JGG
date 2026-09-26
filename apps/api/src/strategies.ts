@@ -8,7 +8,8 @@ import * as D from '../../../packages/domain/src/index.ts';
 import { CHAIN_META, type Chain } from '../../../packages/contracts/src/index.ts';
 import { findFixtureToken, fixtureTokens, fixtureTrades, priceAt, num } from '../../../packages/test-fixtures/src/index.ts';
 import { finderCandidates } from '../../../packages/providers/src/market.ts';
-import { getMarketSource, nativeUsdOf } from '../../../packages/providers/src/execution.ts';
+import { getMarketSource, nativeUsdOf, type PriceObs } from '../../../packages/providers/src/execution.ts';
+import { initialExitState, evalPositionExit, hasUncertainOrderFor } from './exits.ts';
 import { getMode, tradingModeOrThrow, audit, notify, outbox, createQuote, createIntent, approveIntent, executeIntent } from './trading.ts';
 
 // ---------------- Risk policy (deny-by-default) ----------------
@@ -66,6 +67,7 @@ export function setKillSwitch(db: DB, userId: string, on: boolean, now: number) 
 
 // ---------------- Create / manage ----------------
 const ENTRY_KINDS = new Set(['limit_buy', 'limit_buy_tp_sl', 'copy', 'migration_buy', 'dev_snipe', 'token_snipe', 'auto_trader']);
+export { positionOf, submit, event as strategyEvent, save as saveStrategy };
 const pickExit = (p: any): Partial<D.AutoExitConfig> => Object.fromEntries(Object.entries({ partialBps: p.partialBps, trailActivation: p.trailActivation, retracement: p.retracement, tpGain: p.tpGain, stopLoss: p.stopLoss }).filter(([, v]) => v !== undefined)) as any;
 const BLOCKED_KINDS: Record<string, string> = {
   snipex: 'SnipeX semantics are not specified beyond the S11 tab label; JGG will not invent them (spec §0.4).',
@@ -109,7 +111,7 @@ export function createStrategy(db: DB, userId: string, body: { kind: string; cha
   }
   const p = body.params ?? {}; const need = (k: string) => { if (p[k] === undefined || p[k] === '') throw new ApiError('VALIDATION_FAILED', `params.${k} is required for ${body.kind}`, 400); };
   const token = body.tokenAddress;
-  const tokenKinds = ['limit_buy', 'limit_sell', 'tp_sl', 'trailing_tp', 'trailing_sl', 'limit_buy_tp_sl', 'migration_buy', 'dev_sell_exit', 'token_snipe'];
+  const tokenKinds = ['limit_buy', 'limit_sell', 'tp_sl', 'trailing_tp', 'trailing_sl', 'limit_buy_tp_sl', 'migration_buy', 'dev_sell_exit', 'token_snipe', 'position_exit'];
   if (tokenKinds.includes(body.kind)) {
     if (!token) throw new ApiError('VALIDATION_FAILED', 'tokenAddress is required', 400);
     const src = getMarketSource(); const live = !!src && src.kind !== 'fixture';
@@ -142,8 +144,10 @@ export function createStrategy(db: DB, userId: string, body: { kind: string; cha
       case 'dev_snipe': need('creatorWallet'); need('amount'); state = { phase: 'watching', armedAt: now }; break;
       case 'token_snipe': case 'migration_buy': need('amount'); state = { phase: 'watching', armedAt: now }; break;
       case 'dev_sell_exit': state = { phase: 'watching', cursor: now }; break;
+      case 'position_exit': state = initialExitState(db, userId, body.walletId, body.chain, token!, p); break;
       case 'auto_trader': need('amount');
-        D.autoExitParams({ ...D.DEFAULT_AUTO_EXIT, ...pickExit(p) }); // validates the exit plan up front
+        if (p.exit) { p.exit = D.normalizeExitConfig(p.exit); const iss = D.validateExitConfig(p.exit); if (iss.length) throw new ApiError('VALIDATION_FAILED', iss.map(i => i.message).join('; '), 400, false, { issues: iss }); }
+        else D.autoExitParams({ ...D.DEFAULT_AUTO_EXIT, ...pickExit(p) }); // legacy exit params (strategies created before the exit system)
         state = { phase: 'scanning', lastScanAt: 0, bought: {}, decisions: [] }; break;
       default: throw new ApiError('VALIDATION_FAILED', `Unknown strategy kind ${body.kind}`, 400);
     }
@@ -166,7 +170,10 @@ export function strategyView(db: DB, userId: string, id: string) {
   if (!s) throw new ApiError('NOT_FOUND', 'Strategy not found', 404);
   const events = qa(db, `SELECT kind, detail, at FROM strategy_events WHERE strategy_id = ? ORDER BY id DESC LIMIT 50`, id);
   const t = s.token ? (findFixtureToken(s.chain, s.token) ?? (getMarketSource()?.kind === 'solana_live' ? { symbol: q1(db, `SELECT symbol FROM live_tokens WHERE mint = ?`, s.token)?.symbol ?? null } : null)) : null;
-  return { id: s.id, kind: s.kind, mode: s.mode, chain: s.chain, token: s.token, symbol: t?.symbol ?? null, walletId: s.wallet_id, params: JSON.parse(s.params), state: JSON.parse(s.state),
+  const state = JSON.parse(s.state);
+  const exit = s.kind === 'position_exit' ? { levels: D.levels(state), orders: qa(db, `SELECT id, rule, qty, trigger_price, observed_price, state, sold_qty, reason, order_id, planned_at FROM exit_orders WHERE strategy_id = ? ORDER BY planned_at DESC LIMIT 20`, id)
+    .map(o => ({ ...o, planned_at: undefined, plannedAt: new Date(o.planned_at).toISOString() })) } : undefined;
+  return { id: s.id, kind: s.kind, mode: s.mode, chain: s.chain, token: s.token, symbol: t?.symbol ?? null, walletId: s.wallet_id, params: JSON.parse(s.params), state, exit,
     lifecycle: s.lifecycle, reason: s.reason, parentId: s.parent_id, version: s.version, grant: JSON.parse(s.grant_json ?? 'null'), createdAt: new Date(s.created_at).toISOString(), updatedAt: new Date(s.updated_at).toISOString(),
     events: events.map(e => ({ kind: e.kind, detail: JSON.parse(e.detail ?? 'null'), at: new Date(e.at).toISOString() })) };
 }
@@ -194,11 +201,19 @@ export function setStrategyLifecycle(db: DB, userId: string, id: string, action:
 }
 
 // ---------------- Evaluation (worker) ----------------
-let priceOverride: ((token: string, now: number) => string | null) | null = null; // tests only
+let priceOverride: ((token: string, now: number) => string | null | PriceObs) | null = null; // tests only
 function priceUsd(chain: Chain, token: string, now: number): string | null {
-  if (priceOverride) { const o = priceOverride(token, now); if (o !== undefined) return o; }
+  if (priceOverride) { const o = priceOverride(token, now); if (o !== undefined) return typeof o === 'object' && o !== null ? o.usd : o; }
   const src = getMarketSource(); if (src && src.kind !== 'fixture') return src.priceUsd(chain, token, now);
   const t = findFixtureToken(chain, token); const p = t ? priceAt(t, now) : null; return p === null ? null : num(p);
+}
+/** Price with freshness for exits: the live source knows when its price is stale; fixture prices are always current. */
+export function observePrice(chain: Chain, token: string, now: number): PriceObs {
+  if (priceOverride) { const o = priceOverride(token, now); if (o !== undefined) return typeof o === 'object' && o !== null ? o : { usd: o, at: o === null ? null : now, source: 'test-override', staleReason: o === null ? 'NO_PRICE' : null }; }
+  const src = getMarketSource();
+  if (src && src.kind !== 'fixture') return src.priceObs ? src.priceObs(chain, token, now) : (() => { const u = src.priceUsd(chain, token, now); return { usd: u, at: u === null ? null : now, source: src.label, staleReason: u === null ? 'NO_PRICE' : null }; })();
+  const t = findFixtureToken(chain, token); const p = t ? priceAt(t, now) : null;
+  return { usd: p === null ? null : num(p), at: p === null ? null : now, source: 'fixture', staleReason: p === null ? 'NO_PRICE' : null };
 }
 function usage(db: DB, userId: string, chain: string, token: string | null, now: number): D.RiskUsage {
   const dayStart = now - 86_400_000; const native = CHAIN_META[chain as Chain].native;
@@ -256,13 +271,15 @@ export function claimLease(db: DB, id: string, owner: string, now: number, ms = 
 const releaseLease = (db: DB, id: string, owner: string) => run(db, `UPDATE strategies SET lease_owner = NULL, lease_until = NULL WHERE id = ? AND lease_owner = ?`, id, owner);
 
 export function evaluateAll(db: DB, owner: string, now: number, opts: { userId?: string; fault?: any } = {}) {
-  const rows = opts.userId ? qa(db, `SELECT id, user_id FROM strategies WHERE lifecycle = 'active' AND user_id = ?`, opts.userId) : qa(db, `SELECT id, user_id FROM strategies WHERE lifecycle = 'active' LIMIT 500`);
+  const rows = opts.userId ? qa(db, `SELECT id, user_id, kind, token FROM strategies WHERE lifecycle = 'active' AND user_id = ?`, opts.userId) : qa(db, `SELECT id, user_id, kind, token FROM strategies WHERE lifecycle = 'active' LIMIT 500`);
   const results: { id: string; outcome: string }[] = [];
   // T53/T54: while a user has unresolved (uncertain) submissions — e.g. after a crash or a DB restore — automation
   // for that user waits until reconciliation settles them; it never acts on possibly stale balances.
   const blocked = new Set(qa(db, `SELECT DISTINCT user_id FROM orders WHERE state = 'reconciliation_required'`).map(r => r.user_id as string));
-  for (const { id, user_id } of rows) {
-    if (blocked.has(user_id)) { results.push({ id, outcome: 'awaiting_reconciliation' }); continue; }
+  for (const { id, user_id, kind, token } of rows) {
+    // Exit plans are risk-reducing and guard their own position (one order in flight, holdings reconciled before selling):
+    // an uncertain order on ANOTHER coin must not freeze this coin's stop-loss. Same coin → wait.
+    if (blocked.has(user_id) && !(kind === 'position_exit' && !hasUncertainOrderFor(db, user_id, token))) { results.push({ id, outcome: 'awaiting_reconciliation' }); continue; }
     if (!claimLease(db, id, owner, now)) { results.push({ id, outcome: 'lease_held' }); continue; }
     try { results.push({ id, outcome: evaluateOne(db, id, now, opts.fault) }); }
     catch (e) { results.push({ id, outcome: `error:${(e as Error).message}` }); }
@@ -327,9 +344,16 @@ export function evaluateOne(db: DB, id: string, now: number, fault?: any): strin
       if (!claim.ok) { save(db, s, st, 'active', null, now); return `claim_${claim.code}`; }
       if (!D.gt(claim.qty, '0')) { save(db, s, st, 'active', null, now); return 'nothing_to_sell'; }
       st.coord = claim.state;
-      const r = submit(db, s, { side: 'sell', amount: claim.qty, key: `stg:${id}:${c.exitId}`, riskReducing: true }, now, fault);
+      // Key includes the coordinator version: every claim (attempt) has its own id, so a retry after a definitive failure is a new order.
+      const r = submit(db, s, { side: 'sell', amount: claim.qty, key: `stg:${id}:${c.exitId}:v${st.coord.version}`, riskReducing: true }, now, fault);
       if (!r.ok) { event(db, id, 'exit_failed', r, null, now); notify(db, s.user_id, 'unprotected', 'Exit could not be submitted', `${s.kind} exit ${c.exitId} failed: ${r.message}. Position may be unprotected.`, `exitfail:${id}:${c.exitId}`); save(db, s, st, 'active', r.code, now); return `exit_blocked:${r.code}`; }
       if (['reconciliation_required', 'submitting', 'submitted'].includes(r.order.state)) { st.pending = { orderId: r.order.id, exitId: c.exitId }; save(db, s, st, 'active', 'PENDING_SETTLEMENT', now); return 'pending'; }
+      if (r.order.state !== 'finalized') { // failed/expired: nothing sold — return the claim so the exit is re-evaluated (fix: was marked done)
+        st.coord = releaseClaim(st.coord, c.exitId);
+        event(db, id, 'exit_failed', { exitId: c.exitId, orderId: r.order.id, state: r.order.state, error: r.order.error }, null, now);
+        notify(db, s.user_id, 'unprotected', 'Exit sale failed — retrying', `${s.kind} exit ${c.exitId}: ${r.order.error ?? r.order.state}. It will be retried.`, `exitfail:${r.order.id}`);
+        save(db, s, st, 'active', `ORDER_${String(r.order.state).toUpperCase()}`, now); return `exit_failed:${c.exitId}`;
+      }
       markExitDone(st, c.exitId);
       event(db, id, 'exit_filled', { exitId: c.exitId, qty: claim.qty, orderId: r.order.id }, `${id}:exit:${c.exitId}`, now);
       const flat = D.isFlat(st.coord) || c.exitId === 'sl' || c.exitId === 'trailing';
@@ -338,6 +362,7 @@ export function evaluateOne(db: DB, id: string, now: number, fault?: any): strin
     }
     case 'copy': return getMarketSource()?.kind === 'solana_live' ? evalCopyLive(db, s, p, st, now, fault) : evalCopy(db, s, p, st, now, fault);
     case 'auto_trader': return evalAutoTrader(db, s, p, st, now, fault);
+    case 'position_exit': return evalPositionExit(db, s, now, fault);
     case 'dev_snipe': case 'token_snipe': case 'migration_buy': {
       if (getMarketSource()?.kind === 'solana_live') {
         if (s.kind === 'migration_buy') { save(db, s, st, 'paused', 'NOT_ON_LIVE_DATA', now); return 'paused:not_on_live_data'; }
@@ -394,6 +419,10 @@ export function evaluateOne(db: DB, id: string, now: number, fault?: any): strin
   }
 }
 
+function releaseClaim(coord: D.CoordinatorState, exitId: string): D.CoordinatorState {
+  const claimed = coord.claimed.find(c => c.exitId === exitId); if (!claimed) return coord;
+  return { remaining: D.str(D.add(coord.remaining, claimed.qty)), claimed: coord.claimed.filter(c => c.exitId !== exitId), version: coord.version + 1 };
+}
 function markExitDone(st: any, exitId: string) {
   if (exitId === 'sl' && st.sl) st.sl.done = true;
   for (const t of st.tp ?? []) if (t.id === exitId) t.done = true;
@@ -403,9 +432,8 @@ function reconcilePending(db: DB, s: any, st: any, now: number) {
   const o = q1(db, `SELECT state FROM orders WHERE id = ?`, st.pending.orderId);
   if (['reconciliation_required', 'submitting', 'submitted', 'confirmed'].includes(o.state)) return 'awaiting_settlement';
   if (o.state === 'finalized') { markExitDone(st, st.pending.exitId); delete st.pending; save(db, s, st, D.isFlat(st.coord) ? 'completed' : 'active', null, now); return 'reconciled_filled'; }
-  // Not landed: return the claimed quantity to the coordinator so the exit can be re-evaluated (new epoch key).
-  const exitId = st.pending.exitId; const claimed = st.coord.claimed.find((c: any) => c.exitId === exitId);
-  if (claimed) { st.coord.remaining = D.str(D.add(st.coord.remaining, claimed.qty)); st.coord.claimed = st.coord.claimed.filter((c: any) => c.exitId !== exitId); st.coord.version++; }
+  // Not landed: return the claimed quantity to the coordinator so the exit can be re-evaluated (new version → new key).
+  st.coord = releaseClaim(st.coord, st.pending.exitId);
   delete st.pending; save(db, s, st, 'active', null, now); return 'reconciled_not_landed';
 }
 
@@ -413,16 +441,17 @@ function reconcilePending(db: DB, s: any, st: any, now: number) {
 function activateChildExits(db: DB, s: any, o: any, p: any, now: number) {
   try {
     const entryUsd = D.str(D.rescale(D.div(D.mul(o.amountIn, nativeUsdOf(s.chain as Chain, now)), o.filledOut, 18), 18));
-    const exitParams = s.kind === 'auto_trader' ? D.autoExitParams({ ...D.DEFAULT_AUTO_EXIT, ...pickExit(p) }) : { stages: p.stages, stopLoss: p.stopLoss };
-    const child = createStrategyInTx(db, s, { ...exitParams, qty: o.filledOut, entryUsd }, now);
+    const child = s.kind === 'auto_trader' && p.exit
+      ? createStrategyInTx(db, s, { exit: p.exit, qty: o.filledOut, entryUsd, entrySource: 'fill' }, now, 'position_exit') // entry = this buy's actual fill price
+      : createStrategyInTx(db, s, { ...(s.kind === 'auto_trader' ? D.autoExitParams({ ...D.DEFAULT_AUTO_EXIT, ...pickExit(p) }) : { stages: p.stages, stopLoss: p.stopLoss }), qty: o.filledOut, entryUsd }, now);
     event(db, s.id, 'exits_activated', { childId: child, qty: o.filledOut, entryUsd }, `${s.id}:child`, now);
   } catch (e) {
     event(db, s.id, 'exits_failed', { message: (e as Error).message }, `${s.id}:childfail`, now);
     notify(db, s.user_id, 'unprotected', 'Unprotected position', `Buy filled but TP/SL could not be activated: ${(e as Error).message}. Set exits manually.`, `unprot:${s.id}`);
   }
 }
-function createStrategyInTx(db: DB, parent: any, params: any, now: number): string {
-  const v = createStrategy(db, parent.user_id, { kind: 'tp_sl', chain: parent.chain, tokenAddress: parent.token, walletId: parent.wallet_id, params }, now, { id: parent.id, bucket: parent.bucket ?? parent.id });
+function createStrategyInTx(db: DB, parent: any, params: any, now: number, kind = 'tp_sl'): string {
+  const v = createStrategy(db, parent.user_id, { kind, chain: parent.chain, tokenAddress: parent.token, walletId: parent.wallet_id, params }, now, { id: parent.id, bucket: parent.bucket ?? parent.id });
   return v.id;
 }
 export const _testing = { activateChildExits, setPriceOverride: (f: typeof priceOverride) => { priceOverride = f; } };

@@ -85,6 +85,17 @@ CREATE INDEX ix_finder_outcomes_status ON finder_outcomes(status);
 CREATE INDEX ix_finder_outcomes_scanned ON finder_outcomes(scanned_at);
 CREATE TABLE finder_outcome_samples (token TEXT NOT NULL, minutes_since INTEGER NOT NULL, at INTEGER NOT NULL, price_bps_change INTEGER, liq_lamports TEXT NOT NULL, PRIMARY KEY (token, minutes_since));
 CREATE INDEX ix_finder_samples_horizon ON finder_outcome_samples(minutes_since);
+` },
+{ id: '0006_exit_system', sql: `
+CREATE TABLE exit_presets (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), name TEXT NOT NULL, config TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, UNIQUE (user_id, name));
+CREATE TABLE exit_orders (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, strategy_id TEXT NOT NULL, rule TEXT NOT NULL CHECK (rule IN ('stop_loss','partial_tp','trailing')),
+  qty TEXT NOT NULL, trigger_price TEXT NOT NULL, observed_price TEXT NOT NULL, state TEXT NOT NULL CHECK (state IN ('planned','submitted','filled','failed')),
+  intent_id TEXT, order_id TEXT, sold_qty TEXT, reason TEXT, planned_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+CREATE UNIQUE INDEX ux_exit_partial_once ON exit_orders(strategy_id) WHERE rule = 'partial_tp' AND state = 'filled';
+CREATE UNIQUE INDEX ux_exit_one_open ON exit_orders(strategy_id) WHERE state IN ('planned','submitted');
+CREATE INDEX ix_exit_orders_strategy ON exit_orders(strategy_id, planned_at);
+CREATE TABLE ext_prices (chain TEXT NOT NULL, mint TEXT NOT NULL, usd TEXT NOT NULL, source TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (chain, mint));
+ALTER TABLE fills ADD COLUMN unit_usd TEXT;
 ` }];
 
 export function openDb(path: string): DB {

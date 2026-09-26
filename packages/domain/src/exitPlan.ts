@@ -122,6 +122,7 @@ export type Observation = {
   heldQty: string;           // reconciled tokens actually held for this position right now
   staleAfterMs: number;      // older prices never trigger anything
   dustQty?: string;          // below this quantity a sale is not attempted (would not route / costs more than it returns)
+  staleReason?: string | null; // why the source considers the price unusable (logged); forces "stale"
 };
 export type Step = { state: ExitState; events: ExitEvent[]; order: PendingExit | null };
 
@@ -161,9 +162,9 @@ export function decideExit(prev: ExitState, o: Observation, idPrefix: string): S
   if (isZero(s.managedQty)) { close(s, 'POSITION_GONE', ev); return { state: s, events: ev, order: null }; }
 
   // 2. Only fresh, positive, in-order prices can move a stop or trigger a sale.
-  const fresh = o.price !== null && o.priceAt !== null && gt(o.price, '0') && o.now - o.priceAt <= o.staleAfterMs;
+  const fresh = !o.staleReason && o.price !== null && o.priceAt !== null && gt(o.price, '0') && o.now - o.priceAt <= o.staleAfterMs;
   if (!fresh) {
-    if (s.staleSince === null) { s.staleSince = o.now; ev.push({ kind: 'price_stale', detail: { price: o.price, priceAt: o.priceAt, now: o.now, maxAgeMs: o.staleAfterMs } }); }
+    if (s.staleSince === null) { s.staleSince = o.now; ev.push({ kind: 'price_stale', detail: { reason: o.staleReason ?? (o.price === null ? 'NO_PRICE' : 'TOO_OLD'), price: o.price, priceAt: o.priceAt, now: o.now, maxAgeMs: o.staleAfterMs } }); }
     return { state: s, events: ev, order: null };
   }
   if (s.lastPrice && o.priceAt! < s.lastPrice.at) return { state: s, events: ev, order: null }; // older than what we already used
